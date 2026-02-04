@@ -1,0 +1,5 @@
+{
+  "name": "Komi - AI Go Editor",
+  "description": "A professional-grade SGF editor for the game of Go (Baduk/Weiqi) featuring real-time AI analysis and commentary powered by Gemini.",
+  "requestFramePermissions": []
+}
