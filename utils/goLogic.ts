@@ -1,4 +1,13 @@
 import { StoneColor, BoardState, Coordinate } from '../types';
+import {
+  createBoardForMove,
+  getDeadStoneVertices,
+  getInfluenceSummary,
+  getMoveName,
+  getPatternMatches,
+  ShapePattern,
+  toSign,
+} from './sabakiAdapters';
 
 export const BOARD_SIZE = 19;
 
@@ -63,6 +72,61 @@ export const playMove = (
   // Check Ko
   if (currentState.koPoint && currentState.koPoint.x === x && currentState.koPoint.y === y) {
     return { newState: currentState, valid: false, message: 'Ko rule violation' };
+  }
+
+  const sabakiBoard = createBoardForMove(currentState.grid);
+  if (sabakiBoard?.makeMove) {
+    try {
+      const sign = toSign(color);
+      if (sabakiBoard.setCaptures) {
+        sabakiBoard.setCaptures(1, currentState.captures.B);
+        sabakiBoard.setCaptures(-1, currentState.captures.W);
+      }
+      const nextBoard = sabakiBoard.makeMove(sign, [x, y], {
+        preventOverwrite: true,
+        preventSuicide: true,
+      });
+      if (nextBoard?.signMap) {
+        const newGrid = nextBoard.signMap.map((row: number[]) =>
+          row.map((value: number) =>
+            value === 1 ? StoneColor.BLACK : value === -1 ? StoneColor.WHITE : StoneColor.EMPTY
+          )
+        );
+        const capturedStones: Coordinate[] = [];
+        for (let row = 0; row < currentState.grid.length; row++) {
+          for (let col = 0; col < currentState.grid[row].length; col++) {
+            if (
+              currentState.grid[row][col] !== StoneColor.EMPTY &&
+              newGrid[row][col] === StoneColor.EMPTY
+            ) {
+              capturedStones.push({ x: col, y: row });
+            }
+          }
+        }
+
+        let newKoPoint: Coordinate | null = null;
+        if (capturedStones.length === 1) {
+          newKoPoint = capturedStones[0];
+        }
+
+        const newCaptures = {
+          B: typeof nextBoard.getCaptures === 'function' ? nextBoard.getCaptures(1) : currentState.captures.B,
+          W: typeof nextBoard.getCaptures === 'function' ? nextBoard.getCaptures(-1) : currentState.captures.W,
+        };
+
+        return {
+          newState: {
+            grid: newGrid,
+            captures: newCaptures,
+            lastMove: { x, y },
+            koPoint: newKoPoint,
+          },
+          valid: true,
+        };
+      }
+    } catch (error: any) {
+      return { newState: currentState, valid: false, message: error?.message ?? 'Invalid move' };
+    }
   }
 
   // Clone grid
@@ -160,7 +224,7 @@ export const toGtpCoordinate = (x: number, y: number): string => {
 
 // 1. INFLUENCE (Territory Estimation)
 // Uses simple exponential decay: Influence = Sum(Color * e^(-distance/decay))
-export const calculateInfluence = (grid: StoneColor[][]): { blackArea: number, whiteArea: number } => {
+const calculateInfluenceHeuristic = (grid: StoneColor[][]): { blackArea: number, whiteArea: number } => {
     const size = grid.length;
     const DECAY = 2.0; 
 
@@ -188,18 +252,10 @@ export const calculateInfluence = (grid: StoneColor[][]): { blackArea: number, w
     }
 
     return { blackArea, whiteArea };
-}
+};
 
 // 2. BOARDMATCHER (Pattern/Shape Matching)
-interface Pattern {
-    name: string;
-    size: number;
-    // 1=Black, -1=White, 0=Empty, 2=Any
-    grid: number[][]; 
-    type: 'BAD' | 'GOOD';
-}
-
-const PATTERNS: Pattern[] = [
+const PATTERNS: ShapePattern[] = [
     {
         name: "Empty Triangle",
         size: 2,
@@ -231,7 +287,7 @@ const rotateGrid = (g: number[][]) => {
     return res;
 };
 
-export const findShapes = (grid: StoneColor[][]): string[] => {
+const findShapesHeuristic = (grid: StoneColor[][]): string[] => {
     const size = grid.length;
     const found: Set<string> = new Set();
     const numGrid = grid.map(row => row.map(c => c === StoneColor.BLACK ? 1 : c === StoneColor.WHITE ? -1 : 0));
@@ -267,10 +323,10 @@ export const findShapes = (grid: StoneColor[][]): string[] => {
         }
     }
     return Array.from(found);
-}
+};
 
 // 3. DEADSTONES (Heuristic: Weak Groups)
-export const analyzeSafety = (grid: StoneColor[][]): string[] => {
+const analyzeSafetyHeuristic = (grid: StoneColor[][]): string[] => {
    const size = grid.length;
    const visited = new Set<string>();
    const report: string[] = [];
@@ -298,12 +354,47 @@ export const analyzeSafety = (grid: StoneColor[][]): string[] => {
        }
    }
    return report;
-}
+};
 
-export const generateAdvancedReport = (grid: StoneColor[][]): string => {
+export const calculateInfluence = (grid: StoneColor[][]): { blackArea: number, whiteArea: number } => {
+    return getInfluenceSummary(grid) ?? calculateInfluenceHeuristic(grid);
+};
+
+export const findShapes = (
+  grid: StoneColor[][],
+  lastMove: Coordinate | null,
+  lastMoveColor: StoneColor | null
+): string[] => {
+    const sabakiMatches = getPatternMatches(grid, PATTERNS);
+    const heuristicMatches = findShapesHeuristic(grid);
+    const moveName =
+      lastMove && lastMoveColor
+        ? getMoveName(grid, toSign(lastMoveColor), lastMove)
+        : null;
+
+    return [
+      ...(moveName ? [`MOVE NAME: ${moveName} at ${toGtpCoordinate(lastMove.x, lastMove.y)}`] : []),
+      ...sabakiMatches,
+      ...heuristicMatches,
+    ];
+};
+
+export const analyzeSafety = async (grid: StoneColor[][]): Promise<string[]> => {
+  const deadVertices = await getDeadStoneVertices(grid, { iterations: 80 });
+  if (deadVertices.length > 0) {
+    return deadVertices.map((vertex) => `DANGER: Weak group near ${toGtpCoordinate(vertex.x, vertex.y)}.`);
+  }
+  return analyzeSafetyHeuristic(grid);
+};
+
+export const generateAdvancedReport = async (
+  grid: StoneColor[][],
+  lastMove: Coordinate | null,
+  lastMoveColor: StoneColor | null
+): Promise<string> => {
     const influence = calculateInfluence(grid);
-    const shapes = findShapes(grid);
-    const safety = analyzeSafety(grid);
+    const shapes = findShapes(grid, lastMove, lastMoveColor);
+    const safety = await analyzeSafety(grid);
 
     return `
 [INFLUENCE & TERRITORY]
@@ -316,4 +407,4 @@ ${shapes.length > 0 ? shapes.slice(0, 6).join('\n') : "- No critical shapes dete
 [GROUP SAFETY]
 ${safety.length > 0 ? safety.slice(0, 6).join('\n') : "- All groups appear stable (>2 libs)."}
     `;
-}
+};
