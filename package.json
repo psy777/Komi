@@ -16,7 +16,11 @@
     "react-icons": "^5.5.0",
     "@sabaki/boardmatcher": "1.3.0",
     "@sabaki/deadstones": "1.5.2",
-    "@sabaki/influence": "1.0.3"
+    "@sabaki/influence": "1.0.3",
+    "@sabaki/shudan": "github:SabakiHQ/Shudan",
+    "@sabaki/go-board": "github:SabakiHQ/go-board",
+    "@sabaki/sgf": "github:SabakiHQ/sgf",
+    "@sabaki/immutable-gametree": "github:SabakiHQ/immutable-gametree"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
