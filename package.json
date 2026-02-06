@@ -16,7 +16,7 @@
     "react-icons": "^5.5.0",
     "@sabaki/boardmatcher": "1.3.0",
     "@sabaki/deadstones": "github:SabakiHQ/deadstones",
-    "@sabaki/influence": "1.0.3",
+    "@sabaki/influence": "github:SabakiHQ/influence",
     "@sabaki/shudan": "github:SabakiHQ/Shudan",
     "@sabaki/go-board": "github:SabakiHQ/go-board",
     "@sabaki/sgf": "github:SabakiHQ/sgf",
