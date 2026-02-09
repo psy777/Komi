@@ -1,4 +1,4 @@
-import { StoneColor, BoardState, Coordinate } from '../types';
+import { StoneColor, BoardState, Coordinate } from './types';
 
 export const BOARD_SIZE = 19;
 

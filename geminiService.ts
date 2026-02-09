@@ -1,6 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
-import { BoardState, StoneColor } from "../types";
-import { boardToAscii, generateAdvancedReport } from "../utils/goLogic";
+import { BoardState, StoneColor } from "./types";
+import { boardToAscii, generateAdvancedReport } from "./goLogic";
 import { fetchKataGoAnalysis } from "./katagoService";
 
 // Initialize Gemini Client
