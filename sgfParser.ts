@@ -1,4 +1,4 @@
-import { GameTree, GameNode, StoneColor } from '../types';
+import { GameTree, GameNode, StoneColor } from './types';
 import { v4 as uuidv4 } from 'uuid';
 
 // A simplified SGF parser that handles the main line and basic properties.

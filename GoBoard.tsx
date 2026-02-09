@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
-import { StoneColor, Coordinate } from '../types';
-import { BOARD_SIZE } from '../utils/goLogic';
+import { StoneColor, Coordinate } from './types';
+import { BOARD_SIZE } from './goLogic';
 
 interface GoBoardProps {
   grid: StoneColor[][];

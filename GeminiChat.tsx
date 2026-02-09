@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FaPaperPlane, FaRobot, FaUser, FaSpinner, FaLightbulb, FaGhost, FaBolt, FaBars, FaVolumeUp, FaVolumeMute } from 'react-icons/fa';
-import { analyzePosition, chatWithGemini } from '../services/geminiService';
-import { BoardState, ChatMessage, StoneColor, GameTree } from '../types';
-import { toGtpCoordinate } from '../utils/goLogic';
+import { analyzePosition, chatWithGemini } from './geminiService';
+import { BoardState, ChatMessage, StoneColor, GameTree } from './types';
+import { toGtpCoordinate } from './goLogic';
 
 interface GeminiChatProps {
   currentNodeId: string;

@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes } from 'react-icons/fa';
-import GoBoard from './components/GoBoard';
-import GeminiChat from './components/GeminiChat';
+import GoBoard from './GoBoard';
+import GeminiChat from './GeminiChat';
 import { StoneColor, BoardState, GameTree, GameNode, ChatMessage } from './types';
-import { createEmptyGrid, playMove } from './utils/goLogic';
-import { parseSGF, generateSGF } from './utils/sgfParser';
-import { summarizeCommentary } from './services/geminiService';
+import { createEmptyGrid, playMove } from './goLogic';
+import { parseSGF, generateSGF } from './sgfParser';
+import { summarizeCommentary } from './geminiService';
 
 const App: React.FC = () => {
   // --- State ---
