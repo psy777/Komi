@@ -17,7 +17,11 @@ export const analyzePosition = async (
   const turnStr = playerTurn === StoneColor.BLACK ? "Black" : "White";
   
   // 1. Run Advanced Internal Analysis (Influence, Shapes, Deadstones)
-  const scriptReport = generateAdvancedReport(boardState.grid);
+  const scriptReport = await generateAdvancedReport(
+    boardState.grid,
+    boardState.lastMove,
+    boardState.lastMove ? boardState.grid[boardState.lastMove.y][boardState.lastMove.x] : null
+  );
 
   // 2. Fetch KataGo Analysis
   let kataGoContext = "";
