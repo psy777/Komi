@@ -5,6 +5,7 @@ import type {
   MoveClassification,
   MistakeType,
   GamePhase,
+  PlayerLevel,
   StoneColor,
 } from './types';
 
@@ -365,6 +366,41 @@ export function identifyKeyMoments(
     ...ann,
     isKeyMoment: keyMoveNumbers.has(ann.moveNumber),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// 6. estimatePlayerLevel — Auto-suggest player strength from game data
+// ---------------------------------------------------------------------------
+
+/**
+ * Estimate player strength from semantic annotations of a full game.
+ *
+ * Method: average absolute score loss per move. Lower average loss
+ * correlates with stronger play.
+ *
+ * Thresholds (calibrated to amateur ranks):
+ *   - strong (2d+):       avg loss < 1.0
+ *   - advanced (4k–1d):   avg loss < 2.5
+ *   - intermediate (14k–5k): avg loss < 5.0
+ *   - beginner (25k–15k): avg loss >= 5.0
+ *
+ * This is a secondary auto-suggestion — the UI (Phase 4) will let
+ * users override with their actual rank.
+ */
+export function estimatePlayerLevel(annotations: SemanticAnnotation[]): PlayerLevel {
+  if (annotations.length === 0) return 'beginner';
+
+  const totalLoss = annotations.reduce((sum, ann) => {
+    // Only count moves that lost points (negative scoreDelta)
+    return sum + Math.max(0, -ann.scoreDelta);
+  }, 0);
+
+  const avgLoss = totalLoss / annotations.length;
+
+  if (avgLoss < 1.0) return 'strong';
+  if (avgLoss < 2.5) return 'advanced';
+  if (avgLoss < 5.0) return 'intermediate';
+  return 'beginner';
 }
 
 // ---------------------------------------------------------------------------

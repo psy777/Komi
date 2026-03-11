@@ -101,6 +101,26 @@ export interface GameAnalysisResult {
 
 // --- Semantic Analysis Types (Phase 2) ---
 
+// --- Player Level Types (Phase 3) ---
+
+export type PlayerLevel = 'beginner' | 'intermediate' | 'advanced' | 'strong';
+
+export interface PlayerLevelConfig {
+  level: PlayerLevel;
+  label: string;
+  rankRange: string;
+  vocabulary: 'basic' | 'standard' | 'full' | 'professional';
+  focusAreas: string[];
+  style: {
+    useAnalogies: boolean;
+    encouragement: boolean;
+    showExactValues: boolean;
+    technicalDepth: 'shallow' | 'moderate' | 'deep' | 'expert';
+  };
+}
+
+// --- Semantic Analysis Types (Phase 2) ---
+
 export type MoveClassification = 'brilliant' | 'good' | 'neutral' | 'inaccuracy' | 'mistake' | 'blunder';
 
 export type MistakeType = 'direction' | 'shape' | 'reading' | 'timing' | 'overplay' | 'passivity';
