@@ -1,16 +1,19 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes } from 'react-icons/fa';
-import GoBoard from './components/GoBoard';
-import type { MoveAnnotation } from './components/GoBoard';
-import GeminiChat from './components/GeminiChat';
+import GoBoard from './GoBoard';
+import type { MoveAnnotation, PVStone } from './GoBoard';
+import GeminiChat from './GeminiChat';
 import AnalysisProgress from './AnalysisProgress';
 import ScoreGraph from './ScoreGraph';
 import KeyMomentNav from './KeyMomentNav';
+import MistakePanel from './MistakePanel';
+import { clearExplanationCache } from './mistakeExplainer';
+import ConceptTagFilter from './ConceptTagFilter';
 import { StoneColor, BoardState, GameTree, GameNode, ChatMessage, AnalysisProgressData, FullGameAnalysis, SemanticAnnotation } from './types';
-import { createEmptyGrid, playMove } from './utils/goLogic';
-import { parseSGF, generateSGF } from './utils/sgfParser';
-import { summarizeCommentary } from './services/geminiService';
+import { createEmptyGrid, playMove } from './goLogic';
+import { parseSGF, generateSGF } from './sgfParser';
+import { summarizeCommentary } from './geminiService';
 import { batchAnalyze } from './katagoService';
 import { classifyMove, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 
@@ -51,6 +54,13 @@ const App: React.FC = () => {
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgressData | null>(null);
   const [analysisResult, setAnalysisResult] = useState<FullGameAnalysis | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // PV visualization state
+  const [pvStones, setPvStones] = useState<PVStone[]>([]);
+  // Ownership heatmap toggle
+  const [showOwnership, setShowOwnership] = useState(false);
+  // Concept tag filter state
+  const [activeThemes, setActiveThemes] = useState<Set<string>>(new Set());
 
   // --- Derived State for Metadata ---
   const rootNode = gameTree.nodes[gameTree.rootId];
@@ -294,6 +304,7 @@ const App: React.FC = () => {
 
     setIsAnalyzing(true);
     setAnalysisResult(null);
+    clearExplanationCache();
 
     const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
     const toGtp = (x: number, y: number) => `${GTP_COLS[x]}${19 - y}`;
@@ -424,6 +435,119 @@ const App: React.FC = () => {
       .filter((a): a is MoveAnnotation => a !== null);
   }, [analysisResult, gameTree]);
 
+  // GTP coordinate → board coordinate conversion for PV display
+  const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
+  const gtpToBoard = useCallback((gtp: string): { x: number; y: number } | null => {
+    if (!gtp || gtp.length < 2) return null;
+    const col = GTP_COLS.indexOf(gtp[0].toUpperCase());
+    const row = parseInt(gtp.slice(1), 10);
+    if (col < 0 || isNaN(row)) return null;
+    return { x: col, y: 19 - row };
+  }, []);
+
+  // Show PV for a given annotation
+  const handleShowPV = useCallback((annotation: SemanticAnnotation | null) => {
+    if (!annotation || !annotation.enginePV || annotation.enginePV.length === 0) {
+      setPvStones([]);
+      return;
+    }
+    // Determine starting color from the engine's perspective (the player to move at that position)
+    // The annotation is for a move that was played, so the engine PV starts with the move the engine recommends
+    // The engine top move is what the current player should have played, so PV starts with that player's color
+    const moveNode = (() => {
+      const mainLine: GameNode[] = [];
+      let ptr: string | undefined = gameTree.rootId;
+      while (ptr) {
+        mainLine.push(gameTree.nodes[ptr]);
+        ptr = gameTree.nodes[ptr].childrenIds[0];
+      }
+      return mainLine[annotation.moveNumber];
+    })();
+    const startColor = moveNode?.move?.color === StoneColor.BLACK ? 'B' : 'W';
+
+    const stones: PVStone[] = [];
+    let color: 'B' | 'W' = startColor === 'B' ? 'W' : 'B'; // PV is what should have been played instead, starts with same player
+    // Actually: enginePV is the best continuation from the position BEFORE the move was played.
+    // So the first move of PV is the engine's recommended move for the current player.
+    color = moveNode?.move?.color === StoneColor.BLACK ? 'B' : 'W';
+    // Wait — the move at annotation.moveNumber was played by some color. The enginePV is what
+    // the engine thinks should have been played instead. So PV[0] is the same player's best move.
+    // Subsequent moves alternate.
+    for (let i = 0; i < annotation.enginePV.length; i++) {
+      const coord = gtpToBoard(annotation.enginePV[i]);
+      if (!coord) continue;
+      stones.push({ x: coord.x, y: coord.y, color, order: i + 1 });
+      color = color === 'B' ? 'W' : 'B';
+    }
+    setPvStones(stones);
+  }, [gameTree, gtpToBoard]);
+
+  // Clear PV when navigating
+  useEffect(() => {
+    setPvStones([]);
+  }, [gameTree.currentId]);
+
+  // Get ownership data for current position
+  const currentOwnership = React.useMemo(() => {
+    if (!analysisResult || !showOwnership) return null;
+    // currentDepth corresponds to position index in analysisResult.positions
+    const pos = analysisResult.positions[currentDepth];
+    return pos?.ownership ?? null;
+  }, [analysisResult, currentDepth, showOwnership]);
+
+  // Compute highlighted moves for concept filter
+  const highlightedMoves = React.useMemo(() => {
+    if (!analysisResult || activeThemes.size === 0) return undefined;
+    const moves = new Set<number>();
+    for (const ann of analysisResult.annotations) {
+      if (ann.themes.some(t => activeThemes.has(t))) {
+        moves.add(ann.moveNumber);
+      }
+    }
+    return moves;
+  }, [analysisResult, activeThemes]);
+
+  // Selected annotation for MistakePanel (non-neutral/non-good move at current position)
+  const selectedAnnotation = React.useMemo(() => {
+    if (!analysisResult) return null;
+    const ann = analysisResult.annotations.find(a => a.moveNumber === currentDepth);
+    if (!ann || ann.classification === 'neutral' || ann.classification === 'good') return null;
+    return ann;
+  }, [analysisResult, currentDepth]);
+
+  // Played move GTP coordinate for the selected annotation
+  const selectedPlayedMove = React.useMemo(() => {
+    if (!selectedAnnotation) return '';
+    const mainLine: GameNode[] = [];
+    let ptr: string | undefined = gameTree.rootId;
+    while (ptr) {
+      mainLine.push(gameTree.nodes[ptr]);
+      ptr = gameTree.nodes[ptr].childrenIds[0];
+    }
+    const node = mainLine[selectedAnnotation.moveNumber];
+    if (!node?.move) return '';
+    return `${GTP_COLS[node.move.x]}${19 - node.move.y}`;
+  }, [selectedAnnotation, gameTree]);
+
+  const handleToggleTheme = useCallback((theme: string) => {
+    setActiveThemes(prev => {
+      const next = new Set(prev);
+      if (next.has(theme)) next.delete(theme);
+      else next.add(theme);
+      return next;
+    });
+  }, []);
+
+  const handleClearThemes = useCallback(() => {
+    setActiveThemes(new Set());
+  }, []);
+
+  // Has ownership data available at all?
+  const hasOwnershipData = React.useMemo(() => {
+    if (!analysisResult) return false;
+    return analysisResult.positions.some(p => p.ownership && p.ownership.length === 361);
+  }, [analysisResult]);
+
   const currentNode = gameTree.nodes[gameTree.currentId];
   const nextNodes = currentNode.childrenIds.map(id => gameTree.nodes[id]);
 
@@ -524,6 +648,9 @@ const App: React.FC = () => {
                     lastMove={boardState.lastMove}
                     onIntersectionClick={handleIntersectionClick}
                     moveAnnotations={moveAnnotations}
+                    pvStones={pvStones}
+                    ownershipData={currentOwnership}
+                    showOwnership={showOwnership}
                 />
             </div>
         </div>
@@ -539,16 +666,56 @@ const App: React.FC = () => {
                 )}
                 {analysisResult && (
                   <>
+                    {/* Overlay toggles */}
+                    <div className="flex gap-2">
+                      {hasOwnershipData && (
+                        <button
+                          onClick={() => setShowOwnership(v => !v)}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border ${
+                            showOwnership
+                              ? 'bg-blue-600 border-blue-500 text-white'
+                              : 'bg-slate-700/50 border-slate-600/50 text-slate-400 hover:bg-slate-700'
+                          }`}
+                        >
+                          Territory
+                        </button>
+                      )}
+                      {pvStones.length > 0 && (
+                        <button
+                          onClick={() => setPvStones([])}
+                          className="px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border bg-indigo-600 border-indigo-500 text-white"
+                        >
+                          Hide PV
+                        </button>
+                      )}
+                    </div>
                     <ScoreGraph
                       annotations={analysisResult.annotations}
                       currentMove={currentDepth}
                       onMoveSelect={handleJumpToMove}
+                      highlightedMoves={highlightedMoves}
+                    />
+                    <ConceptTagFilter
+                      themes={analysisResult.summary.themes}
+                      activeThemes={activeThemes}
+                      onToggleTheme={handleToggleTheme}
+                      onClearAll={handleClearThemes}
                     />
                     <KeyMomentNav
                       keyMoments={analysisResult.keyMoments}
                       currentMove={currentDepth}
                       onMoveSelect={handleJumpToMove}
+                      activeThemes={activeThemes}
+                      onShowPV={handleShowPV}
                     />
+                    {selectedAnnotation && (
+                      <MistakePanel
+                        annotation={selectedAnnotation}
+                        playedMove={selectedPlayedMove}
+                        playerLevel={analysisResult.playerLevel}
+                        onShowEngineLine={() => handleShowPV(selectedAnnotation)}
+                      />
+                    )}
                   </>
                 )}
               </div>

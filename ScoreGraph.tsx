@@ -14,6 +14,7 @@ interface ScoreGraphProps {
   annotations: SemanticAnnotation[];
   currentMove: number;
   onMoveSelect: (moveNumber: number) => void;
+  highlightedMoves?: Set<number>;
 }
 
 const GRAPH_W = 600;
@@ -28,7 +29,7 @@ function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMoveSelect }) => {
+const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMoveSelect, highlightedMoves }) => {
   const { points, pathD } = useMemo(() => {
     if (annotations.length === 0) return { points: [], pathD: '' };
 
@@ -130,6 +131,22 @@ const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMov
               r={p.classification === 'blunder' ? 3 : 2.5}
               fill={CLASSIFICATION_COLORS[p.classification]}
               opacity={0.9}
+            />
+          ))}
+
+        {/* Highlighted moves from concept filter */}
+        {highlightedMoves && highlightedMoves.size > 0 && points
+          .filter((p) => highlightedMoves.has(p.moveNumber))
+          .map((p) => (
+            <line
+              key={`hl-${p.moveNumber}`}
+              x1={p.x}
+              y1={PAD_Y}
+              x2={p.x}
+              y2={PAD_Y + PLOT_H}
+              stroke="#10b981"
+              strokeWidth="1"
+              opacity={0.25}
             />
           ))}
 

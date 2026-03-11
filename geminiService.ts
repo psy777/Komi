@@ -1,10 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
-import { BoardState, StoneColor, PlayerLevel, PlayerLevelConfig, SemanticAnnotation } from "../types";
-import { boardToAscii, generateAdvancedReport } from "../utils/goLogic";
+import { BoardState, StoneColor, PlayerLevel, PlayerLevelConfig, SemanticAnnotation } from "./types";
+import { boardToAscii, generateAdvancedReport } from "./goLogic";
 import { fetchKataGoAnalysis } from "./katagoService";
 
 // Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 // ---------------------------------------------------------------------------
 // Player Level Configuration — exported constants

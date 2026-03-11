@@ -1,12 +1,19 @@
 import React, { useMemo } from 'react';
-import { StoneColor, Coordinate, MoveClassification } from '../types';
-import { BOARD_SIZE } from '../utils/goLogic';
+import { StoneColor, Coordinate, MoveClassification } from './types';
+import { BOARD_SIZE } from './goLogic';
 
 export interface MoveAnnotation {
   x: number;
   y: number;
   classification: MoveClassification;
   moveNumber: number;
+}
+
+export interface PVStone {
+  x: number;
+  y: number;
+  color: 'B' | 'W';
+  order: number;
 }
 
 const CLASSIFICATION_COLORS: Record<MoveClassification, string> = {
@@ -24,6 +31,9 @@ interface GoBoardProps {
   onIntersectionClick: (x: number, y: number) => void;
   markers?: { x: number; y: number; label: string }[];
   moveAnnotations?: MoveAnnotation[];
+  pvStones?: PVStone[];
+  ownershipData?: number[] | null;
+  showOwnership?: boolean;
 }
 
 const STAR_POINTS = [
@@ -32,7 +42,7 @@ const STAR_POINTS = [
   { x: 3, y: 15 }, { x: 9, y: 15 }, { x: 15, y: 15 },
 ];
 
-const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, markers, moveAnnotations }) => {
+const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, markers, moveAnnotations, pvStones, ownershipData, showOwnership }) => {
   const cellSize = 30;
   const padding = 30;
   const boardPixelSize = (BOARD_SIZE - 1) * cellSize + padding * 2;
@@ -142,6 +152,69 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
     }
   }
 
+  // Ownership Heatmap overlay
+  const ownershipOverlay = useMemo(() => {
+    if (!showOwnership || !ownershipData || ownershipData.length !== BOARD_SIZE * BOARD_SIZE) return null;
+    const rects = [];
+    for (let y = 0; y < BOARD_SIZE; y++) {
+      for (let x = 0; x < BOARD_SIZE; x++) {
+        const val = ownershipData[y * BOARD_SIZE + x];
+        if (Math.abs(val) < 0.05) continue;
+        const cx = padding + x * cellSize;
+        const cy = padding + y * cellSize;
+        // Black ownership → blue, White ownership → red
+        const color = val > 0 ? '59, 130, 246' : '239, 68, 68';
+        const intensity = Math.min(Math.abs(val), 1) * 0.45;
+        rects.push(
+          <rect
+            key={`own-${x}-${y}`}
+            x={cx - cellSize / 2}
+            y={cy - cellSize / 2}
+            width={cellSize}
+            height={cellSize}
+            fill={`rgba(${color}, ${intensity})`}
+            rx={2}
+          />
+        );
+      }
+    }
+    return rects;
+  }, [ownershipData, showOwnership, padding, cellSize]);
+
+  // PV Ghost Stones
+  const pvOverlay = useMemo(() => {
+    if (!pvStones || pvStones.length === 0) return null;
+    return pvStones.map((stone) => {
+      const cx = padding + stone.x * cellSize;
+      const cy = padding + stone.y * cellSize;
+      const isBlack = stone.color === 'B';
+      return (
+        <g key={`pv-${stone.order}`}>
+          <circle
+            cx={cx}
+            cy={cy}
+            r={cellSize / 2 - 2}
+            fill={isBlack ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)'}
+            stroke={isBlack ? 'rgba(0,0,0,0.6)' : 'rgba(200,200,200,0.6)'}
+            strokeWidth={1}
+          />
+          <text
+            x={cx}
+            y={cy + 1}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize={cellSize * 0.4}
+            fontWeight="bold"
+            fill={isBlack ? '#a5b4fc' : '#1e293b'}
+            className="select-none"
+          >
+            {stone.order}
+          </text>
+        </g>
+      );
+    });
+  }, [pvStones, padding, cellSize]);
+
   // Click Handlers (transparent rects over intersections)
   const clickTargets = [];
   for (let y = 0; y < BOARD_SIZE; y++) {
@@ -207,7 +280,9 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
         {gridLines}
         {starPoints}
         {coords}
+        {ownershipOverlay}
         {stones}
+        {pvOverlay}
         {clickTargets}
         </svg>
       </div>

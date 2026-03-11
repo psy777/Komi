@@ -169,3 +169,17 @@ export interface SemanticAnnotation {
   isKeyMoment: boolean;
   commentary?: string;
 }
+
+/** Structured mistake explanation with comparative analysis (Phase 5a) */
+export interface MistakeExplanation {
+  moveNumber: number;
+  classification: MoveClassification;
+  mistakeType?: MistakeType;
+  playedMove: string;
+  engineMove: string;
+  enginePV: string[];
+  scoreDelta: number;
+  winrateDelta: number;
+  gamePhase: GamePhase;
+  explanation: string | null;
+}
