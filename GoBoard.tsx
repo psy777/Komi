@@ -1,12 +1,29 @@
 import React, { useMemo } from 'react';
-import { StoneColor, Coordinate } from '../types';
+import { StoneColor, Coordinate, MoveClassification } from '../types';
 import { BOARD_SIZE } from '../utils/goLogic';
+
+export interface MoveAnnotation {
+  x: number;
+  y: number;
+  classification: MoveClassification;
+  moveNumber: number;
+}
+
+const CLASSIFICATION_COLORS: Record<MoveClassification, string> = {
+  brilliant: '#2196F3',
+  good: '#4CAF50',
+  neutral: '#9E9E9E',
+  inaccuracy: '#FFC107',
+  mistake: '#FF9800',
+  blunder: '#F44336',
+};
 
 interface GoBoardProps {
   grid: StoneColor[][];
   lastMove: Coordinate | null;
   onIntersectionClick: (x: number, y: number) => void;
   markers?: { x: number; y: number; label: string }[];
+  moveAnnotations?: MoveAnnotation[];
 }
 
 const STAR_POINTS = [
@@ -15,7 +32,7 @@ const STAR_POINTS = [
   { x: 3, y: 15 }, { x: 9, y: 15 }, { x: 15, y: 15 },
 ];
 
-const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, markers }) => {
+const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, markers, moveAnnotations }) => {
   const cellSize = 30;
   const padding = 30;
   const boardPixelSize = (BOARD_SIZE - 1) * cellSize + padding * 2;
@@ -103,6 +120,22 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
                 strokeWidth={2}
               />
             )}
+            {/* Classification Annotation Ring */}
+            {moveAnnotations && (() => {
+              const ann = moveAnnotations.find(a => a.x === x && a.y === y);
+              if (!ann || ann.classification === 'neutral' || ann.classification === 'good') return null;
+              return (
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={cellSize / 2 + 1}
+                  fill="none"
+                  stroke={CLASSIFICATION_COLORS[ann.classification]}
+                  strokeWidth={2.5}
+                  opacity={0.85}
+                />
+              );
+            })()}
           </g>
         );
       }

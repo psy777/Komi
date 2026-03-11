@@ -119,6 +119,34 @@ export interface PlayerLevelConfig {
   };
 }
 
+// --- Analysis Orchestration Types (Phase 4b UI) ---
+
+export type AnalysisPhase = 'engine' | 'semantic' | 'commentary' | 'complete';
+
+export interface AnalysisProgressData {
+  phase: AnalysisPhase;
+  current: number;
+  total: number;
+  message?: string;
+}
+
+export interface AnalysisSummary {
+  totalMoves: number;
+  classificationCounts: Record<MoveClassification, number>;
+  phaseBreakdown: Record<GamePhase, number>;
+  themes: string[];
+}
+
+export interface FullGameAnalysis {
+  sgfHash: string;
+  playerLevel: PlayerLevel;
+  positions: KataGoAnalysis[];
+  annotations: SemanticAnnotation[];
+  keyMoments: SemanticAnnotation[];
+  summary: AnalysisSummary;
+  analyzedAt: number;
+}
+
 // --- Semantic Analysis Types (Phase 2) ---
 
 export type MoveClassification = 'brilliant' | 'good' | 'neutral' | 'inaccuracy' | 'mistake' | 'blunder';

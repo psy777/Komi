@@ -1,12 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes } from 'react-icons/fa';
 import GoBoard from './components/GoBoard';
+import type { MoveAnnotation } from './components/GoBoard';
 import GeminiChat from './components/GeminiChat';
-import { StoneColor, BoardState, GameTree, GameNode, ChatMessage } from './types';
+import AnalysisProgress from './AnalysisProgress';
+import ScoreGraph from './ScoreGraph';
+import KeyMomentNav from './KeyMomentNav';
+import { StoneColor, BoardState, GameTree, GameNode, ChatMessage, AnalysisProgressData, FullGameAnalysis, SemanticAnnotation } from './types';
 import { createEmptyGrid, playMove } from './utils/goLogic';
 import { parseSGF, generateSGF } from './utils/sgfParser';
 import { summarizeCommentary } from './services/geminiService';
+import { batchAnalyze } from './katagoService';
+import { classifyMove, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 
 const App: React.FC = () => {
   // --- State ---
@@ -40,6 +46,11 @@ const App: React.FC = () => {
 
   // State to track if an interaction needs summarization upon leaving the node
   const [interactionToSummarize, setInteractionToSummarize] = useState<{nodeId: string, question: string, answer: string} | null>(null);
+
+  // Analysis state
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgressData | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<FullGameAnalysis | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // --- Derived State for Metadata ---
   const rootNode = gameTree.nodes[gameTree.rootId];
@@ -265,6 +276,154 @@ const App: React.FC = () => {
       URL.revokeObjectURL(url);
   };
 
+  // --- Analysis Handler ---
+  const handleAnalyzeGame = useCallback(async () => {
+    if (isAnalyzing) return;
+
+    // Walk the main line to collect all moves
+    const mainLine: GameNode[] = [];
+    let ptr = gameTree.rootId;
+    while (ptr) {
+      const node = gameTree.nodes[ptr];
+      mainLine.push(node);
+      ptr = node.childrenIds[0]; // Follow main line
+    }
+
+    const moveNodes = mainLine.filter(n => n.move);
+    if (moveNodes.length < 2) return;
+
+    setIsAnalyzing(true);
+    setAnalysisResult(null);
+
+    const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
+    const toGtp = (x: number, y: number) => `${GTP_COLS[x]}${19 - y}`;
+
+    // Build cumulative move lists for each position (including empty board)
+    const positions: Array<{ moves: string[]; komi: number; currentPlayer: StoneColor }> = [];
+    const gtpMoves: string[] = [];
+
+    // Position 0: empty board
+    positions.push({ moves: [], komi, currentPlayer: StoneColor.BLACK });
+
+    for (const node of moveNodes) {
+      const m = node.move!;
+      gtpMoves.push(`${m.color === StoneColor.BLACK ? 'B' : 'W'} ${toGtp(m.x, m.y)}`);
+      const nextPlayer = m.color === StoneColor.BLACK ? StoneColor.WHITE : StoneColor.BLACK;
+      positions.push({ moves: [...gtpMoves], komi, currentPlayer: nextPlayer });
+    }
+
+    // Phase 1: Engine analysis
+    const totalPositions = positions.length;
+    setAnalysisProgress({ phase: 'engine', current: 0, total: totalPositions });
+
+    const analysisResults = await batchAnalyze(positions, 3, (completed, total) => {
+      setAnalysisProgress({ phase: 'engine', current: completed, total });
+    });
+
+    // Phase 2: Semantic classification
+    setAnalysisProgress({ phase: 'semantic', current: 0, total: moveNodes.length });
+
+    const annotations: SemanticAnnotation[] = [];
+    const classificationCounts: Record<string, number> = {
+      brilliant: 0, good: 0, neutral: 0, inaccuracy: 0, mistake: 0, blunder: 0,
+    };
+    const phaseBreakdown: Record<string, number> = { opening: 0, middlegame: 0, endgame: 0 };
+    const allThemes: Set<string> = new Set();
+
+    for (let i = 0; i < moveNodes.length; i++) {
+      const evalBefore = analysisResults[i];
+      const evalAfter = analysisResults[i + 1];
+
+      if (!evalBefore || !evalAfter) {
+        setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
+        continue;
+      }
+
+      const { classification, scoreDelta, winrateDelta } = classifyMove(evalBefore, evalAfter);
+      const moveNode = moveNodes[i];
+      const moveGtp = toGtp(moveNode.move!.x, moveNode.move!.y);
+
+      // Board occupancy estimate
+      const stoneCount = i + 1;
+      const boardOccupancy = stoneCount / 361;
+
+      const gamePhase = detectGamePhase(i + 1, evalBefore.ownership, boardOccupancy);
+      const themes = detectThemes(evalBefore, evalAfter, evalBefore.moveInfos[0]);
+      const engineTopMove = evalBefore.moveInfos[0]?.move ?? moveGtp;
+      const enginePV = evalBefore.moveInfos[0]?.pv ?? [engineTopMove];
+
+      classificationCounts[classification] = (classificationCounts[classification] ?? 0) + 1;
+      phaseBreakdown[gamePhase] = (phaseBreakdown[gamePhase] ?? 0) + 1;
+      themes.forEach(t => allThemes.add(t));
+
+      annotations.push({
+        moveNumber: i + 1,
+        classification,
+        scoreDelta,
+        winrateDelta,
+        gamePhase,
+        themes,
+        engineTopMove,
+        enginePV,
+        isKeyMoment: false,
+      });
+
+      setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
+    }
+
+    // Identify key moments
+    const annotationsWithKeys = identifyKeyMoments(annotations);
+    const keyMoments = annotationsWithKeys.filter(a => a.isKeyMoment);
+    const playerLevel = estimatePlayerLevel(annotationsWithKeys);
+
+    const result: FullGameAnalysis = {
+      sgfHash: '',
+      playerLevel,
+      positions: analysisResults.filter((r): r is NonNullable<typeof r> => r !== null),
+      annotations: annotationsWithKeys,
+      keyMoments,
+      summary: {
+        totalMoves: moveNodes.length,
+        classificationCounts: classificationCounts as any,
+        phaseBreakdown: phaseBreakdown as any,
+        themes: Array.from(allThemes),
+      },
+      analyzedAt: Date.now(),
+    };
+
+    setAnalysisResult(result);
+    setAnalysisProgress({ phase: 'complete', current: moveNodes.length, total: moveNodes.length });
+    setIsAnalyzing(false);
+  }, [gameTree, komi, isAnalyzing]);
+
+  // Compute move annotations for GoBoard from analysis results
+  const moveAnnotations: MoveAnnotation[] = React.useMemo(() => {
+    if (!analysisResult) return [];
+
+    // Walk main line to build moveNumber → (x, y) mapping
+    const mainLine: GameNode[] = [];
+    let ptr: string | undefined = gameTree.rootId;
+    while (ptr) {
+      const node = gameTree.nodes[ptr];
+      mainLine.push(node);
+      ptr = node.childrenIds[0];
+    }
+
+    return analysisResult.annotations
+      .filter(ann => ann.classification !== 'neutral' && ann.classification !== 'good')
+      .map(ann => {
+        const node = mainLine[ann.moveNumber]; // moveNumber is 1-indexed, mainLine[0] is root
+        if (!node?.move) return null;
+        return {
+          x: node.move.x,
+          y: node.move.y,
+          classification: ann.classification,
+          moveNumber: ann.moveNumber,
+        };
+      })
+      .filter((a): a is MoveAnnotation => a !== null);
+  }, [analysisResult, gameTree]);
+
   const currentNode = gameTree.nodes[gameTree.currentId];
   const nextNodes = currentNode.childrenIds.map(id => gameTree.nodes[id]);
 
@@ -340,6 +499,17 @@ const App: React.FC = () => {
                 <FaSave className="text-blue-400" />
                 <span className="hidden sm:inline">Save</span>
             </button>
+            <button
+              onClick={handleAnalyzeGame}
+              disabled={isAnalyzing}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-xs font-semibold ${
+                isAnalyzing
+                  ? 'bg-emerald-900/50 text-emerald-400/60 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+              }`}
+            >
+              {isAnalyzing ? 'Analyzing...' : 'Analyze Game'}
+            </button>
         </div>
       </header>
 
@@ -349,10 +519,11 @@ const App: React.FC = () => {
         {/* Left Panel: Board (Priority - maximized space) */}
         <div className="flex-1 flex flex-col min-w-0 relative">
             <div className="flex-1 overflow-hidden flex items-center justify-center p-2 sm:p-4">
-                 <GoBoard 
-                    grid={boardState.grid} 
+                 <GoBoard
+                    grid={boardState.grid}
                     lastMove={boardState.lastMove}
                     onIntersectionClick={handleIntersectionClick}
+                    moveAnnotations={moveAnnotations}
                 />
             </div>
         </div>
@@ -360,6 +531,29 @@ const App: React.FC = () => {
         {/* Sidebar Docked Layout */}
         <div className="w-full md:w-[400px] bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 flex flex-col shrink-0 z-20 h-auto md:h-full">
             
+            {/* Analysis Panel */}
+            {(analysisProgress || analysisResult) && (
+              <div className="p-3 space-y-2 border-b border-slate-800 overflow-y-auto max-h-[50%] shrink-0">
+                {analysisProgress && (
+                  <AnalysisProgress progress={analysisProgress} result={analysisResult} />
+                )}
+                {analysisResult && (
+                  <>
+                    <ScoreGraph
+                      annotations={analysisResult.annotations}
+                      currentMove={currentDepth}
+                      onMoveSelect={handleJumpToMove}
+                    />
+                    <KeyMomentNav
+                      keyMoments={analysisResult.keyMoments}
+                      currentMove={currentDepth}
+                      onMoveSelect={handleJumpToMove}
+                    />
+                  </>
+                )}
+              </div>
+            )}
+
             {/* Chat History Section (Expands UPWARD on mobile) */}
             <div className={`flex-1 overflow-hidden bg-slate-950/20 flex flex-col transition-all duration-300 ease-in-out ${chatExpanded ? 'h-[250px] md:h-full opacity-100' : 'h-0 opacity-0 md:opacity-100 md:h-full'}`}>
                  <GeminiChat 
