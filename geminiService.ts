@@ -3,8 +3,19 @@ import { BoardState, StoneColor, PlayerLevel, PlayerLevelConfig, SemanticAnnotat
 import { boardToAscii, generateAdvancedReport } from "./goLogic";
 import { fetchKataGoAnalysis } from "./katagoService";
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
+// Lazy-initialized Gemini client — deferred to first use so the app renders
+// even when VITE_GEMINI_API_KEY is not set (e.g. Vercel build without env var).
+let _ai: GoogleGenAI | null = null;
+function getAI(): GoogleGenAI {
+  if (!_ai) {
+    const key = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!key) {
+      throw new Error('VITE_GEMINI_API_KEY is not set. Add it to your .env file or Vercel environment variables.');
+    }
+    _ai = new GoogleGenAI({ apiKey: key });
+  }
+  return _ai;
+}
 
 // ---------------------------------------------------------------------------
 // Player Level Configuration — exported constants
@@ -249,7 +260,7 @@ export const analyzePosition = async (
     : `What is the best move? Board:\n${boardAscii}`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await getAI().models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: [
         { role: 'user', parts: [{ text: systemPrompt + "\n\n" + userPrompt }] }
@@ -338,7 +349,7 @@ INSTRUCTIONS:
     : `Please explain move ${annotation.moveNumber} (${annotation.classification}).`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await getAI().models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: [
         { role: 'user', parts: [{ text: systemPrompt + '\n\n' + userPrompt }] }
@@ -360,7 +371,7 @@ INSTRUCTIONS:
  */
 export const summarizeCommentary = async (question: string, answer: string): Promise<string> => {
   try {
-    const response = await ai.models.generateContent({
+    const response = await getAI().models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: [
         {
