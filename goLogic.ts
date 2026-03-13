@@ -300,6 +300,93 @@ export const analyzeSafety = (grid: StoneColor[][]): string[] => {
    return report;
 }
 
+// --- AREA SCORING (Chinese Rules) ---
+
+export interface ScoringResult {
+  blackStones: number;
+  whiteStones: number;
+  blackTerritory: number;
+  whiteTerritory: number;
+  blackTotal: number;   // stones + territory
+  whiteTotal: number;   // stones + territory + komi
+  komi: number;
+  winner: 'B' | 'W';
+  margin: number;
+  dame: number;         // neutral points
+}
+
+/**
+ * Score a finished position using Chinese area scoring.
+ * Counts stones + surrounded empty territory for each color.
+ * Dame (neutral) points are not counted for either side.
+ */
+export const scorePosition = (grid: StoneColor[][], komi: number = 6.5): ScoringResult => {
+  const size = grid.length;
+  const visited = new Set<string>();
+
+  let blackStones = 0;
+  let whiteStones = 0;
+  let blackTerritory = 0;
+  let whiteTerritory = 0;
+  let dame = 0;
+
+  // Count stones
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (grid[y][x] === StoneColor.BLACK) blackStones++;
+      else if (grid[y][x] === StoneColor.WHITE) whiteStones++;
+    }
+  }
+
+  // Flood-fill empty regions to determine territory
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (grid[y][x] !== StoneColor.EMPTY) continue;
+      const key = `${x},${y}`;
+      if (visited.has(key)) continue;
+
+      // BFS to find the empty region and its bordering colors
+      const region: Coordinate[] = [];
+      const borders = new Set<StoneColor>();
+      const stack: Coordinate[] = [{ x, y }];
+
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        const ck = `${current.x},${current.y}`;
+        if (visited.has(ck)) continue;
+        visited.add(ck);
+        region.push(current);
+
+        for (const n of getNeighbors(current.x, current.y, size)) {
+          const stone = grid[n.y][n.x];
+          if (stone === StoneColor.EMPTY) {
+            if (!visited.has(`${n.x},${n.y}`)) stack.push(n);
+          } else {
+            borders.add(stone);
+          }
+        }
+      }
+
+      // If bordered by only one color, it's that color's territory
+      if (borders.size === 1) {
+        const owner = borders.values().next().value!;
+        if (owner === StoneColor.BLACK) blackTerritory += region.length;
+        else whiteTerritory += region.length;
+      } else {
+        // Bordered by both or neither — dame
+        dame += region.length;
+      }
+    }
+  }
+
+  const blackTotal = blackStones + blackTerritory;
+  const whiteTotal = whiteStones + whiteTerritory + komi;
+  const winner: 'B' | 'W' = blackTotal > whiteTotal ? 'B' : 'W';
+  const margin = Math.abs(blackTotal - whiteTotal);
+
+  return { blackStones, whiteStones, blackTerritory, whiteTerritory, blackTotal, whiteTotal, komi, winner, margin, dame };
+};
+
 export const generateAdvancedReport = (grid: StoneColor[][]): string => {
     const influence = calculateInfluence(grid);
     const shapes = findShapes(grid);
