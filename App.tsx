@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes, FaCamera } from 'react-icons/fa';
+import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes, FaCamera, FaLink } from 'react-icons/fa';
 import GoBoard from './GoBoard';
 import type { MoveAnnotation, PVStone } from './GoBoard';
 import GeminiChat from './GeminiChat';
@@ -16,6 +16,7 @@ import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
 import { batchAnalyze } from './katagoService';
 import { classifyMove, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
+import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
   onOpenScorer?: () => void;
@@ -65,6 +66,12 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
   const [showOwnership, setShowOwnership] = useState(false);
   // Concept tag filter state
   const [activeThemes, setActiveThemes] = useState<Set<string>>(new Set());
+
+  // OGS import state
+  const [showOgsImport, setShowOgsImport] = useState(false);
+  const [ogsUrl, setOgsUrl] = useState('');
+  const [ogsLoading, setOgsLoading] = useState(false);
+  const [ogsError, setOgsError] = useState<string | null>(null);
 
   // --- Derived State for Metadata ---
   const rootNode = gameTree.nodes[gameTree.rootId];
@@ -277,6 +284,28 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       if (content) setGameTree(parseSGF(content));
     };
     reader.readAsText(file);
+  };
+
+  const handleOgsImport = async () => {
+    const gameId = parseOgsGameId(ogsUrl);
+    if (!gameId) {
+      setOgsError('Invalid OGS URL or game ID. Use a link like online-go.com/game/12345 or just the numeric ID.');
+      return;
+    }
+    setOgsLoading(true);
+    setOgsError(null);
+    try {
+      const sgf = await fetchOgsSgf(gameId);
+      setGameTree(parseSGF(sgf));
+      setShowOgsImport(false);
+      setOgsUrl('');
+      setAnalysisResult(null);
+      setAnalysisProgress(null);
+    } catch (err) {
+      setOgsError(err instanceof Error ? err.message : 'Failed to fetch game from OGS.');
+    } finally {
+      setOgsLoading(false);
+    }
   };
 
   const handleSaveSGF = () => {
@@ -611,6 +640,46 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
         </div>
       )}
 
+      {/* OGS Import Modal */}
+      {showOgsImport && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => !ogsLoading && setShowOgsImport(false)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-bold text-slate-300 uppercase tracking-widest">Import from OGS</h2>
+              <button onClick={() => setShowOgsImport(false)} className="p-1.5 hover:bg-slate-800 rounded-full text-slate-500 hover:text-white transition-colors" disabled={ogsLoading}>
+                <FaTimes size={14} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">Paste an OGS game link or numeric game ID.</p>
+            <form onSubmit={(e) => { e.preventDefault(); handleOgsImport(); }} className="space-y-3">
+              <input
+                type="text"
+                value={ogsUrl}
+                onChange={e => { setOgsUrl(e.target.value); setOgsError(null); }}
+                placeholder="https://online-go.com/game/12345"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/30 transition-all"
+                autoFocus
+                disabled={ogsLoading}
+              />
+              {ogsError && (
+                <p className="text-xs text-red-400">{ogsError}</p>
+              )}
+              <button
+                type="submit"
+                disabled={ogsLoading || !ogsUrl.trim()}
+                className={`w-full py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                  ogsLoading || !ogsUrl.trim()
+                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                    : 'bg-amber-600 hover:bg-amber-500 text-white'
+                }`}
+              >
+                {ogsLoading ? 'Fetching game...' : 'Import Game'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Navbar */}
       <header className="h-12 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 shadow-md z-20 shrink-0">
         <div className="flex items-center">
@@ -623,6 +692,10 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                 <span className="hidden sm:inline">Open</span>
                 <input type="file" accept=".sgf" className="hidden" onChange={handleFileUpload} />
             </label>
+            <button onClick={() => { setShowOgsImport(true); setOgsError(null); }} className="flex items-center gap-1.5 hover:bg-slate-800 text-slate-400 hover:text-white px-3 py-1.5 rounded-lg transition-all text-xs font-semibold">
+                <FaLink className="text-amber-400" />
+                <span className="hidden sm:inline">OGS</span>
+            </button>
             <button onClick={handleSaveSGF} className="flex items-center gap-1.5 hover:bg-slate-800 text-slate-400 hover:text-white px-3 py-1.5 rounded-lg transition-all text-xs font-semibold">
                 <FaSave className="text-blue-400" />
                 <span className="hidden sm:inline">Save</span>
