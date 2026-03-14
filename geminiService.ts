@@ -1,21 +1,7 @@
-import { GoogleGenAI } from "@google/genai";
 import { BoardState, StoneColor, PlayerLevel, PlayerLevelConfig, SemanticAnnotation } from "./types";
 import { boardToAscii, generateAdvancedReport } from "./goLogic";
 import { fetchKataGoAnalysis } from "./katagoService";
-
-// Lazy-initialized Gemini client — deferred to first use so the app renders
-// even when VITE_GEMINI_API_KEY is not set (e.g. Vercel build without env var).
-let _ai: GoogleGenAI | null = null;
-function getAI(): GoogleGenAI {
-  if (!_ai) {
-    const key = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!key) {
-      throw new Error('VITE_GEMINI_API_KEY is not set. Add it to your .env file or Vercel environment variables.');
-    }
-    _ai = new GoogleGenAI({ apiKey: key });
-  }
-  return _ai;
-}
+import { geminiGenerate } from "./geminiProxy";
 
 // ---------------------------------------------------------------------------
 // Player Level Configuration — exported constants
@@ -260,17 +246,11 @@ export const analyzePosition = async (
     : `What is the best move? Board:\n${boardAscii}`;
 
   try {
-    const response = await getAI().models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        { role: 'user', parts: [{ text: systemPrompt + "\n\n" + userPrompt }] }
-      ],
-      config: {
-        temperature: 0.3,
-      }
-    });
-
-    const aiText = response.text || "I couldn't generate an analysis.";
+    const aiText = await geminiGenerate(
+      'gemini-3-flash-preview',
+      [{ role: 'user', parts: [{ text: systemPrompt + "\n\n" + userPrompt }] }],
+      { temperature: 0.3 },
+    ) || "I couldn't generate an analysis.";
 
     // APPEND DEBUG INFO FOR THE USER
     const debugBlock = `
@@ -349,17 +329,13 @@ INSTRUCTIONS:
     : `Please explain move ${annotation.moveNumber} (${annotation.classification}).`;
 
   try {
-    const response = await getAI().models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        { role: 'user', parts: [{ text: systemPrompt + '\n\n' + userPrompt }] }
-      ],
-      config: {
-        temperature: 0.3,
-      }
-    });
+    const text = await geminiGenerate(
+      'gemini-3-flash-preview',
+      [{ role: 'user', parts: [{ text: systemPrompt + '\n\n' + userPrompt }] }],
+      { temperature: 0.3 },
+    );
 
-    return response.text || "I couldn't generate commentary for this moment.";
+    return text || "I couldn't generate commentary for this moment.";
   } catch (error) {
     console.error("Gemini Key Moment Error:", error);
     return `Error generating commentary for move ${annotation.moveNumber}.`;
@@ -371,26 +347,21 @@ INSTRUCTIONS:
  */
 export const summarizeCommentary = async (question: string, answer: string): Promise<string> => {
   try {
-    const response = await getAI().models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        {
-            role: 'user',
-            parts: [{ text: `Summarize this Go advice into a tiny comment (MAX 8 WORDS). Plain text.
+    const text = await geminiGenerate(
+      'gemini-3-flash-preview',
+      [{
+        role: 'user',
+        parts: [{ text: `Summarize this Go advice into a tiny comment (MAX 8 WORDS). Plain text.
 
             Q: ${question}
             A: ${answer}
 
-            Summary:` }]
-        }
-      ],
-      config: {
-        temperature: 0.5,
-        maxOutputTokens: 20,
-      }
-    });
+            Summary:` }],
+      }],
+      { temperature: 0.5, maxOutputTokens: 20 },
+    );
 
-    return response.text?.trim() || "";
+    return text?.trim() || "";
   } catch (error) {
     console.error("Gemini Summary Error:", error);
     return "";

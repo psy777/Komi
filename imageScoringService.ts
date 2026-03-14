@@ -1,19 +1,7 @@
-import { GoogleGenAI } from "@google/genai";
 import { StoneColor } from "./types";
 import { scorePosition, BOARD_SIZE } from "./goLogic";
 import type { ScoringResult } from "./goLogic";
-
-let _ai: GoogleGenAI | null = null;
-function getAI(): GoogleGenAI {
-  if (!_ai) {
-    const key = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!key) {
-      throw new Error("VITE_GEMINI_API_KEY is not set.");
-    }
-    _ai = new GoogleGenAI({ apiKey: key });
-  }
-  return _ai;
-}
+import { geminiGenerate } from "./geminiProxy";
 
 export interface ImageScoringResult {
   grid: StoneColor[][];
@@ -116,11 +104,9 @@ export async function scoreBoardImage(
   mimeType: string,
   komi: number = 6.5
 ): Promise<ImageScoringResult> {
-  const ai = getAI();
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-preview-05-20",
-    contents: [
+  const rawResponse = await geminiGenerate(
+    "gemini-2.5-flash-preview-05-20",
+    [
       {
         role: "user",
         parts: [
@@ -129,12 +115,8 @@ export async function scoreBoardImage(
         ],
       },
     ],
-    config: {
-      temperature: 0.1,
-    },
-  });
-
-  const rawResponse = response.text || "";
+    { temperature: 0.1 },
+  );
   const { grid, boardSize, confidence } = parseGridResponse(rawResponse);
   const score = scorePosition(grid, komi);
 
