@@ -157,6 +157,16 @@ export type MistakeType = 'direction' | 'shape' | 'reading' | 'timing' | 'overpl
 
 export type GamePhase = 'opening' | 'middlegame' | 'endgame';
 
+/** Why a move was flagged as a key moment — describes the game-shifting nature */
+export type KeyMomentReason =
+  | 'lead_change'        // Advantage flipped between players
+  | 'decisive_blow'      // Game went from competitive to decided
+  | 'missed_opportunity' // Player could have taken decisive lead but didn't
+  | 'big_mistake'        // Blunder or major mistake that shifted the game
+  | 'brilliant_play'     // Outstanding move that shifted evaluation
+  | 'momentum_shift'     // Large evaluation swing in a competitive position
+  | 'phase_transition';  // Opening→middlegame or middlegame→endgame
+
 /** Pattern/formation detected by boardmatcher */
 export interface PatternInfo {
   name: string;
@@ -180,6 +190,8 @@ export interface SemanticAnnotation {
   /** Opponent's best continuation after the played move (shows punishment for mistakes) */
   refutationPV?: string[];
   isKeyMoment: boolean;
+  /** Why this move was flagged as a key moment (set when isKeyMoment is true) */
+  keyMomentReason?: KeyMomentReason;
   commentary?: string;
   /** Pattern/formation detected at this move (e.g. "Tiger's Mouth", "3-3 Point Invasion") */
   pattern?: PatternInfo;

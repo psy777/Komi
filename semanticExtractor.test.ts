@@ -286,7 +286,7 @@ describe('identifyKeyMoments', () => {
     expect(identifyKeyMoments([])).toEqual([]);
   });
 
-  it('marks blunders as key moments', () => {
+  it('marks blunders as key moments with big_mistake reason', () => {
     const anns = [
       makeAnnotation({ moveNumber: 1, classification: 'neutral', scoreDelta: 0 }),
       makeAnnotation({ moveNumber: 50, classification: 'blunder', scoreDelta: -8.0 }),
@@ -294,6 +294,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('big_mistake');
   });
 
   it('marks game phase transitions as key moments', () => {
@@ -303,6 +304,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('phase_transition');
   });
 
   it('marks brilliant moves as key moments', () => {
@@ -311,6 +313,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('brilliant_play');
   });
 
   it('respects maxKeyMoments limit', () => {
@@ -330,5 +333,96 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+  });
+
+  // --- Game trajectory tests (with positions) ---
+
+  it('detects lead change when winrate crosses 0.5', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'neutral', scoreDelta: 0 }),
+      makeAnnotation({ moveNumber: 2, classification: 'inaccuracy', scoreDelta: -1.5 }),
+    ];
+    // positions[0] = before move 1, positions[1] = after move 1 / before move 2, positions[2] = after move 2
+    const positions = [
+      makeEval({ winrate: 0.55 }),  // Black ahead
+      makeEval({ winrate: 0.52 }),  // Still Black
+      makeEval({ winrate: 0.45 }),  // Now White ahead — lead change on move 2
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('lead_change');
+  });
+
+  it('detects decisive blow when game goes from competitive to decided', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'brilliant', scoreDelta: 3.0 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.60 }),  // Competitive (within 0.30-0.70)
+      makeEval({ winrate: 0.78 }),  // Decided (> 0.70)
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('decisive_blow');
+  });
+
+  it('detects missed opportunity when engine move would have been decisive', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'inaccuracy', scoreDelta: -1.5 }),
+    ];
+    // Engine's top move would push to 0.75 (decisive), but played move stays at 0.58 (competitive)
+    const positions = [
+      makeEval({
+        winrate: 0.60,
+        moveInfos: [
+          { move: 'D4', visits: 80, winrate: 0.75, scoreLead: 8.0, prior: 0.4, pv: ['D4'] },
+          { move: 'Q16', visits: 20, winrate: 0.58, scoreLead: 2.0, prior: 0.2, pv: ['Q16'] },
+        ],
+      }),
+      makeEval({ winrate: 0.58 }),
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('missed_opportunity');
+  });
+
+  it('gives closeness boost to moments in competitive positions', () => {
+    // Two identical blunders, but one in a close game, one in a decided game
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'mistake', scoreDelta: -3.5 }),
+      makeAnnotation({ moveNumber: 2, classification: 'mistake', scoreDelta: -3.5 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.50 }),  // Very close — move 1 gets closeness boost
+      makeEval({ winrate: 0.48 }),
+      makeEval({ winrate: 0.85 }),  // Already decided — move 2 gets no boost
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    // Both should be key moments but move 1 should have higher priority
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[1].isKeyMoment).toBe(true);
+  });
+
+  it('works without positions (backward compatibility)', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 50, classification: 'blunder', scoreDelta: -8.0 }),
+    ];
+    const result = identifyKeyMoments(anns);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('big_mistake');
+  });
+
+  it('lead_change takes priority over classification-based reasons', () => {
+    // A blunder that also causes a lead change should be labeled as lead_change
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'blunder', scoreDelta: -8.0 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.55 }),  // Black ahead
+      makeEval({ winrate: 0.40 }),  // White ahead — lead change
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('lead_change');
   });
 });

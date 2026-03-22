@@ -308,7 +308,7 @@ export async function analyzeGame(
   // 6. Key moments
   // ------------------------------------------------------------------
 
-  const annotated = identifyKeyMoments(normalized);
+  const annotated = identifyKeyMoments(normalized, analysisResults);
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
 
   // ------------------------------------------------------------------

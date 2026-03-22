@@ -7,6 +7,7 @@ import type {
   GamePhase,
   PlayerLevel,
   StoneColor,
+  KeyMomentReason,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -345,18 +346,97 @@ export function detectThemes(
 }
 
 // ---------------------------------------------------------------------------
-// 5. identifyKeyMoments — Filter for pedagogically important positions
+// 5. identifyKeyMoments — Filter for game-shifting positions
 // ---------------------------------------------------------------------------
 
+/** Winrate thresholds for game trajectory detection */
+const TRAJECTORY_THRESHOLDS = {
+  /** Winrate above which a position is "decided" for one side */
+  decided: 0.70,
+  /** Winrate above which the game is effectively over */
+  gameOver: 0.90,
+  /** Range [0.5 - competitive, 0.5 + competitive] is "competitive" */
+  competitive: 0.15,
+} as const;
+
 /**
- * Filter annotations to find the most pedagogically important moments.
+ * Detect the primary reason a move is a key moment.
+ * Returns the highest-priority reason that applies.
+ */
+function detectKeyMomentReason(
+  ann: SemanticAnnotation,
+  idx: number,
+  annotations: SemanticAnnotation[],
+  winrateBefore?: number,
+  winrateAfter?: number,
+  engineBestWinrate?: number,
+): { reason: KeyMomentReason; bonus: number } | null {
+  const t = TRAJECTORY_THRESHOLDS;
+
+  // --- Lead change: winrate crosses 0.5 ---
+  if (winrateBefore !== undefined && winrateAfter !== undefined) {
+    const leaderBefore = winrateBefore >= 0.5 ? 'B' : 'W';
+    const leaderAfter  = winrateAfter >= 0.5 ? 'B' : 'W';
+    if (leaderBefore !== leaderAfter) {
+      return { reason: 'lead_change', bonus: 5 };
+    }
+  }
+
+  // --- Decisive blow: game transitions from competitive to decided ---
+  if (winrateBefore !== undefined && winrateAfter !== undefined) {
+    const wasClosed = winrateBefore > (1 - t.decided) && winrateBefore < t.decided;
+    const nowDecided = winrateAfter >= t.decided || winrateAfter <= (1 - t.decided);
+    if (wasClosed && nowDecided) {
+      return { reason: 'decisive_blow', bonus: 4 };
+    }
+  }
+
+  // --- Missed opportunity: engine move would have been decisive but played move wasn't ---
+  if (
+    winrateBefore !== undefined &&
+    winrateAfter !== undefined &&
+    engineBestWinrate !== undefined
+  ) {
+    const engineWouldDecide = engineBestWinrate >= t.decided || engineBestWinrate <= (1 - t.decided);
+    const actualStillClose = winrateAfter > (1 - t.decided) && winrateAfter < t.decided;
+    if (engineWouldDecide && actualStillClose && ann.classification !== 'brilliant' && ann.classification !== 'good') {
+      return { reason: 'missed_opportunity', bonus: 3 };
+    }
+  }
+
+  // --- Classification-based reasons ---
+  if (ann.classification === 'blunder' || ann.classification === 'mistake') {
+    return { reason: 'big_mistake', bonus: ann.classification === 'blunder' ? 4 : 2 };
+  }
+  if (ann.classification === 'brilliant') {
+    return { reason: 'brilliant_play', bonus: 3 };
+  }
+
+  // --- Momentum shift in competitive position ---
+  if (Math.abs(ann.winrateDelta) > 0.15) {
+    return { reason: 'momentum_shift', bonus: 2 };
+  }
+
+  // --- Phase transition ---
+  if (idx > 0 && annotations[idx - 1].gamePhase !== ann.gamePhase) {
+    return { reason: 'phase_transition', bonus: 2 };
+  }
+
+  return null;
+}
+
+/**
+ * Identify the most important game-shifting moments.
  *
- * Key moments include: blunders, mistakes, brilliant moves, game phase
- * transitions, and large evaluation swings. Returns the input annotations
- * with `isKeyMoment` set appropriately.
+ * When `positions` are provided (engine evaluations for each board state),
+ * uses the game trajectory to detect lead changes, decisive blows, and
+ * missed opportunities — the moments where the game truly shifted or
+ * could have shifted. Falls back to classification-only scoring when
+ * positions are unavailable.
  */
 export function identifyKeyMoments(
   annotations: SemanticAnnotation[],
+  positions?: (KataGoAnalysis | null)[],
 ): SemanticAnnotation[] {
   if (annotations.length === 0) return [];
 
@@ -366,24 +446,42 @@ export function identifyKeyMoments(
   const scored = annotations.map((ann, idx) => {
     let keyScore = 0;
 
-    // Large evaluation swings are always important
+    // --- Winrate trajectory from positions ---
+    // positions[i] = eval BEFORE move i+1, positions[i+1] = eval AFTER move i+1
+    const moveIdx = ann.moveNumber - 1;
+    const posBefore = positions?.[moveIdx] ?? null;
+    const posAfter  = positions?.[moveIdx + 1] ?? null;
+    const winrateBefore = posBefore?.rootInfo.winrate;
+    const winrateAfter  = posAfter?.rootInfo.winrate;
+
+    // Engine's best move winrate (what would have happened with optimal play)
+    const engineBestWinrate = posBefore?.moveInfos?.[0]?.winrate;
+
+    // --- Detect game-shifting reason ---
+    const detected = detectKeyMomentReason(
+      ann, idx, annotations,
+      winrateBefore, winrateAfter, engineBestWinrate,
+    );
+    let reason: KeyMomentReason | undefined;
+    if (detected) {
+      keyScore += detected.bonus;
+      reason = detected.reason;
+    }
+
+    // --- Additional scoring factors ---
+
+    // Large evaluation swings
     if (Math.abs(ann.scoreDelta) > t.scoreDeltaAbs) {
       keyScore += 3;
     }
 
-    // Blunders and brilliant moves
-    if (ann.classification === 'blunder')   keyScore += 4;
-    if (ann.classification === 'mistake')   keyScore += 2;
-    if (ann.classification === 'brilliant') keyScore += 3;
-
-    // Game phase transitions
-    if (idx > 0 && annotations[idx - 1].gamePhase !== ann.gamePhase) {
-      keyScore += 2;
-    }
-
-    // Momentum shifts (large winrate delta)
-    if (Math.abs(ann.winrateDelta) > 0.15) {
-      keyScore += 2;
+    // Closeness boost: moments in competitive positions matter more
+    if (winrateBefore !== undefined) {
+      const closeness = 1 - 2 * Math.abs(winrateBefore - 0.5);
+      if (closeness > 0.7) {
+        // Scale up by 30% for very close positions
+        keyScore = Math.round(keyScore * 1.3);
+      }
     }
 
     // First move of the game is context-setting
@@ -391,21 +489,23 @@ export function identifyKeyMoments(
       keyScore += 1;
     }
 
-    return { annotation: ann, keyScore };
+    return { annotation: ann, keyScore, reason };
   });
 
   // Sort by keyScore descending, take top N
   const sorted = [...scored].sort((a, b) => b.keyScore - a.keyScore);
-  const keyMoveNumbers = new Set(
-    sorted.slice(0, t.maxKeyMoments)
-      .filter(s => s.keyScore > 0)
-      .map(s => s.annotation.moveNumber)
-  );
+  const keyMomentMap = new Map<number, KeyMomentReason | undefined>();
+  for (const s of sorted) {
+    if (s.keyScore > 0 && keyMomentMap.size < t.maxKeyMoments) {
+      keyMomentMap.set(s.annotation.moveNumber, s.reason);
+    }
+  }
 
-  // Return annotations with isKeyMoment set
+  // Return annotations with isKeyMoment and reason set
   return annotations.map(ann => ({
     ...ann,
-    isKeyMoment: keyMoveNumbers.has(ann.moveNumber),
+    isKeyMoment: keyMomentMap.has(ann.moveNumber),
+    keyMomentReason: keyMomentMap.get(ann.moveNumber),
   }));
 }
 

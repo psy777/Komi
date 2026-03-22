@@ -1,5 +1,5 @@
 import React from 'react';
-import type { SemanticAnnotation, MoveClassification } from './types';
+import type { SemanticAnnotation, MoveClassification, KeyMomentReason } from './types';
 
 const CLASSIFICATION_COLORS: Record<MoveClassification, string> = {
   brilliant: '#2196F3',
@@ -17,6 +17,26 @@ const CLASSIFICATION_LABELS: Record<MoveClassification, string> = {
   inaccuracy: 'Inaccuracy',
   mistake: 'Mistake',
   blunder: 'Blunder',
+};
+
+const REASON_LABELS: Record<KeyMomentReason, string> = {
+  lead_change: 'Lead Changed',
+  decisive_blow: 'Decisive',
+  missed_opportunity: 'Missed Chance',
+  big_mistake: 'Big Mistake',
+  brilliant_play: 'Brilliant',
+  momentum_shift: 'Momentum Shift',
+  phase_transition: 'New Phase',
+};
+
+const REASON_COLORS: Record<KeyMomentReason, string> = {
+  lead_change: '#E040FB',
+  decisive_blow: '#FF5252',
+  missed_opportunity: '#FFD740',
+  big_mistake: '#FF9800',
+  brilliant_play: '#2196F3',
+  momentum_shift: '#7C4DFF',
+  phase_transition: '#69F0AE',
 };
 
 interface KeyMomentNavProps {
@@ -59,10 +79,19 @@ const KeyMomentNav: React.FC<KeyMomentNavProps> = ({ keyMoments, currentMove, on
               />
               {/* Move number */}
               <span className="text-xs font-mono text-slate-500 w-8 shrink-0">#{moment.moveNumber}</span>
-              {/* Classification label */}
-              <span className="text-xs font-semibold" style={{ color }}>
-                {CLASSIFICATION_LABELS[moment.classification]}
-              </span>
+              {/* Reason label (why this moment matters) or fallback to classification */}
+              {moment.keyMomentReason ? (
+                <span
+                  className="text-xs font-semibold"
+                  style={{ color: REASON_COLORS[moment.keyMomentReason] }}
+                >
+                  {REASON_LABELS[moment.keyMomentReason]}
+                </span>
+              ) : (
+                <span className="text-xs font-semibold" style={{ color }}>
+                  {CLASSIFICATION_LABELS[moment.classification]}
+                </span>
+              )}
               {/* PV button */}
               {onShowPV && moment.enginePV.length > 0 && (
                 <button
