@@ -105,6 +105,16 @@ const MistakePanel: React.FC<MistakePanelProps> = ({
         </div>
       </div>
 
+      {/* Pattern badge */}
+      {annotation.pattern && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] text-indigo-400 uppercase tracking-wider font-bold">{annotation.pattern.category}</span>
+          <span className="text-xs text-indigo-300 bg-indigo-900/30 border border-indigo-800/30 px-1.5 py-0.5 rounded font-medium">
+            {annotation.pattern.name}
+          </span>
+        </div>
+      )}
+
       {/* Score delta + Mistake type */}
       <div className="flex items-center gap-3 text-xs">
         <span className={`font-mono font-bold ${annotation.scoreDelta < 0 ? 'text-red-400' : 'text-emerald-400'}`}>

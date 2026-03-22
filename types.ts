@@ -155,6 +155,13 @@ export type MistakeType = 'direction' | 'shape' | 'reading' | 'timing' | 'overpl
 
 export type GamePhase = 'opening' | 'middlegame' | 'endgame';
 
+/** Pattern/formation detected by boardmatcher */
+export interface PatternInfo {
+  name: string;
+  category: 'opening' | 'approach' | 'shape' | 'joseki' | 'tactical' | 'placement' | 'connection';
+  url?: string;
+}
+
 /** Semantic annotation for a single move in a game */
 export interface SemanticAnnotation {
   moveNumber: number;
@@ -168,6 +175,8 @@ export interface SemanticAnnotation {
   enginePV: string[];
   isKeyMoment: boolean;
   commentary?: string;
+  /** Pattern/formation detected at this move (e.g. "Tiger's Mouth", "3-3 Point Invasion") */
+  pattern?: PatternInfo;
 }
 
 /** Structured mistake explanation with comparative analysis (Phase 5a) */

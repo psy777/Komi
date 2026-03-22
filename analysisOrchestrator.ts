@@ -16,6 +16,7 @@ import {
   identifyKeyMoments,
   estimatePlayerLevel,
 } from './semanticExtractor';
+import { detectPatternsForGame } from './patternDetector';
 import { toGtpCoordinate } from './goLogic';
 import type {
   KataGoAnalysis,
@@ -44,6 +45,8 @@ interface ExtractedMove {
   color: string; // 'B' | 'W'
   gtp: string;   // e.g. "D4"
   moveNumber: number;
+  x: number;
+  y: number;
 }
 
 /**
@@ -62,6 +65,8 @@ function extractMoves(tree: GameTree): ExtractedMove[] {
         color: node.move.color as string,
         gtp: toGtpCoordinate(node.move.x, node.move.y),
         moveNumber: moveNum,
+        x: node.move.x,
+        y: node.move.y,
       });
     }
     nodeId = node?.childrenIds[0] ?? null;
@@ -202,6 +207,15 @@ export async function analyzeGame(
     message: 'Classifying moves...',
   });
 
+  // Pattern detection (replays game internally)
+  const patterns = detectPatternsForGame(
+    moves.map(m => ({
+      x: m.x,
+      y: m.y,
+      color: m.color === 'B' ? StoneColor.BLACK : StoneColor.WHITE,
+    })),
+  );
+
   const annotations: SemanticAnnotation[] = [];
 
   for (let i = 0; i < totalMoves; i++) {
@@ -252,6 +266,7 @@ export async function analyzeGame(
       engineTopMove,
       enginePV,
       isKeyMoment: false,
+      pattern: patterns[i] ?? undefined,
     });
 
     onProgress?.({ phase: 'semantic', current: i + 1, total: totalMoves });
@@ -297,6 +312,18 @@ export async function analyzeGame(
   const allThemes = [
     ...new Set(annotated.flatMap((a) => a.themes)),
   ];
+
+  // Collect unique pattern categories for summary
+  const patternCategories = [
+    ...new Set(
+      annotated
+        .filter((a) => a.pattern)
+        .map((a) => a.pattern!.category),
+    ),
+  ];
+  if (patternCategories.length > 0) {
+    allThemes.push(...patternCategories.filter((c) => !allThemes.includes(c)));
+  }
 
   const summary: AnalysisSummary = {
     totalMoves,

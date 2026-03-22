@@ -72,8 +72,14 @@ const KeyMomentNav: React.FC<KeyMomentNavProps> = ({ keyMoments, currentMove, on
                   PV
                 </button>
               )}
+              {/* Pattern name */}
+              {moment.pattern && (
+                <span className="text-[9px] text-indigo-400/70 truncate max-w-[80px]" title={moment.pattern.name}>
+                  {moment.pattern.name}
+                </span>
+              )}
               {/* Phase badge */}
-              <span className="text-[9px] text-slate-600 ml-auto uppercase tracking-wider">
+              <span className="text-[9px] text-slate-600 ml-auto uppercase tracking-wider shrink-0">
                 {moment.gamePhase}
               </span>
             </button>
