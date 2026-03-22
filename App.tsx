@@ -15,7 +15,7 @@ import { createEmptyGrid, playMove } from './goLogic';
 import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
 import { batchAnalyze } from './katagoService';
-import { classifyMove, normalizeAndClassify, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
+import { classifyMove, normalizeAndClassify, detectMistakeType, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
@@ -393,7 +393,8 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       const boardOccupancy = stoneCount / 361;
 
       const gamePhase = detectGamePhase(i + 1, evalBefore.ownership, boardOccupancy);
-      const themes = detectThemes(evalBefore, evalAfter, evalBefore.moveInfos[0]);
+      const actualMoveInfo = evalBefore.moveInfos.find(m => m.move === moveGtp);
+      const themes = detectThemes(evalBefore, evalAfter, actualMoveInfo);
       const engineTopMove = evalBefore.moveInfos[0]?.move ?? moveGtp;
       const enginePV = evalBefore.moveInfos[0]?.pv ?? [engineTopMove];
 
@@ -403,6 +404,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
 
       annotations.push({
         moveNumber: i + 1,
+        color: moveNode.move!.color,
         classification,
         scoreDelta,
         winrateDelta,
@@ -418,6 +420,26 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
 
     // Normalize score deltas to remove proxy per-move drift, then re-classify
     const normalized = normalizeAndClassify(annotations);
+
+    // Detect mistake types after normalization (needs corrected classifications)
+    for (let j = 0; j < normalized.length; j++) {
+      const ann = normalized[j];
+      const moveIdx = ann.moveNumber - 1;
+      const evalBefore = analysisResults[moveIdx];
+      if (!evalBefore) continue;
+
+      const actualMove = toGtp(moveNodes[moveIdx].move!.x, moveNodes[moveIdx].move!.y);
+      normalized[j] = {
+        ...ann,
+        mistakeType: detectMistakeType(
+          actualMove,
+          ann.engineTopMove,
+          ann.classification,
+          ann.scoreDelta,
+          evalBefore.rootInfo.winrate,
+        ),
+      };
+    }
 
     // Identify key moments
     const annotationsWithKeys = identifyKeyMoments(normalized);

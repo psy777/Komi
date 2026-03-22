@@ -112,9 +112,9 @@ const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMov
         <text x={PAD_X - 4} y={PAD_Y + PLOT_H / 2 + 3} textAnchor="end" fontSize="8" fill="#64748b">0</text>
         <text x={PAD_X - 4} y={PAD_Y + PLOT_H} textAnchor="end" fontSize="8" fill="#64748b">-{SCORE_CAP}</text>
 
-        {/* Black/White territory shading */}
-        <rect x={PAD_X} y={PAD_Y} width={PLOT_W} height={PLOT_H / 2} fill="#fff" opacity="0.02" />
-        <rect x={PAD_X} y={PAD_Y + PLOT_H / 2} width={PLOT_W} height={PLOT_H / 2} fill="#000" opacity="0.05" />
+        {/* Black/White territory shading — top half = B+, bottom half = W+ */}
+        <rect x={PAD_X} y={PAD_Y} width={PLOT_W} height={PLOT_H / 2} fill="#000" opacity="0.05" />
+        <rect x={PAD_X} y={PAD_Y + PLOT_H / 2} width={PLOT_W} height={PLOT_H / 2} fill="#fff" opacity="0.03" />
 
         {/* Score line */}
         <path d={pathD} fill="none" stroke="#10b981" strokeWidth="1.5" strokeLinejoin="round" />
