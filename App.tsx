@@ -549,6 +549,35 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     setPvStones(stones);
   }, [gameTree, gtpToBoard]);
 
+  // Show refutation PV for a given annotation (opponent's punishment after a mistake)
+  const handleShowRefutation = useCallback((annotation: SemanticAnnotation | null) => {
+    if (!annotation || !annotation.refutationPV || annotation.refutationPV.length === 0) {
+      setPvStones([]);
+      return;
+    }
+    // Refutation starts with the OPPONENT's move (responding to the mistake)
+    const moveNode = (() => {
+      const mainLine: GameNode[] = [];
+      let ptr: string | undefined = gameTree.rootId;
+      while (ptr) {
+        mainLine.push(gameTree.nodes[ptr]);
+        ptr = gameTree.nodes[ptr].childrenIds[0];
+      }
+      return mainLine[annotation.moveNumber];
+    })();
+    // The mistake was played by moveNode's color; refutation starts with opponent
+    let color: 'B' | 'W' = moveNode?.move?.color === StoneColor.BLACK ? 'W' : 'B';
+
+    const stones: PVStone[] = [];
+    for (let i = 0; i < annotation.refutationPV.length; i++) {
+      const coord = gtpToBoard(annotation.refutationPV[i]);
+      if (!coord) continue;
+      stones.push({ x: coord.x, y: coord.y, color, order: i + 1 });
+      color = color === 'B' ? 'W' : 'B';
+    }
+    setPvStones(stones);
+  }, [gameTree, gtpToBoard]);
+
   // Clear PV when navigating
   useEffect(() => {
     setPvStones([]);
@@ -827,6 +856,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                       onMoveSelect={handleJumpToMove}
                       activeThemes={activeThemes}
                       onShowPV={handleShowPV}
+                      onShowRefutation={handleShowRefutation}
                     />
                     {selectedAnnotation && (
                       <TutoringPanel
@@ -835,6 +865,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                         playerLevel={analysisResult.playerLevel}
                         analysis={analysisResult}
                         onShowEngineLine={() => handleShowPV(selectedAnnotation)}
+                        onShowRefutation={() => handleShowRefutation(selectedAnnotation)}
                         onNavigateToMove={handleJumpToMove}
                       />
                     )}

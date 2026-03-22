@@ -177,6 +177,8 @@ export interface SemanticAnnotation {
   themes: string[];
   engineTopMove: string;
   enginePV: string[];
+  /** Opponent's best continuation after the played move (shows punishment for mistakes) */
+  refutationPV?: string[];
   isKeyMoment: boolean;
   commentary?: string;
   /** Pattern/formation detected at this move (e.g. "Tiger's Mouth", "3-3 Point Invasion") */

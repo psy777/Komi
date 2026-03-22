@@ -25,9 +25,10 @@ interface KeyMomentNavProps {
   onMoveSelect: (moveNumber: number) => void;
   activeThemes?: Set<string>;
   onShowPV?: (annotation: SemanticAnnotation) => void;
+  onShowRefutation?: (annotation: SemanticAnnotation) => void;
 }
 
-const KeyMomentNav: React.FC<KeyMomentNavProps> = ({ keyMoments, currentMove, onMoveSelect, activeThemes, onShowPV }) => {
+const KeyMomentNav: React.FC<KeyMomentNavProps> = ({ keyMoments, currentMove, onMoveSelect, activeThemes, onShowPV, onShowRefutation }) => {
   const filteredMoments = activeThemes && activeThemes.size > 0
     ? keyMoments.filter(m => m.themes.some(t => activeThemes.has(t)))
     : keyMoments;
@@ -70,6 +71,16 @@ const KeyMomentNav: React.FC<KeyMomentNavProps> = ({ keyMoments, currentMove, on
                   title="Show engine line"
                 >
                   PV
+                </button>
+              )}
+              {/* Refutation button */}
+              {onShowRefutation && moment.refutationPV && moment.refutationPV.length > 0 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onShowRefutation(moment); }}
+                  className="text-[9px] text-red-400 hover:text-red-300 font-semibold uppercase tracking-wider shrink-0"
+                  title="Show refutation line"
+                >
+                  RF
                 </button>
               )}
               {/* Pattern name */}

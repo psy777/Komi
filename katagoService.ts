@@ -176,3 +176,43 @@ export const batchAnalyze = async (
 
     return results;
 };
+
+/**
+ * Build a PV (principal variation) line by iteratively querying the proxy.
+ *
+ * Since the proxy only returns the top move per query (no full PV sequences),
+ * we extend the line by appending the best move, querying the next position,
+ * and repeating until the desired depth.
+ *
+ * @param baseMoves - GTP move list up to (but not including) the starting position
+ * @param startingPlayer - Whose turn it is at the starting position
+ * @param depth - Number of moves to extend (default 6)
+ * @param komi - Game komi
+ * @returns Array of GTP move strings forming the variation line
+ */
+export const buildPVLine = async (
+    baseMoves: string[],
+    startingPlayer: StoneColor,
+    depth: number = 6,
+    komi: number = 6.5,
+): Promise<string[]> => {
+    const line: string[] = [];
+    const currentMoves = [...baseMoves];
+    let player = startingPlayer;
+
+    for (let i = 0; i < depth; i++) {
+        const result = await analyzePosition(currentMoves, komi, player);
+        if (!result || result.moveInfos.length === 0) break;
+
+        const bestMove = result.moveInfos[0].move;
+        if (!bestMove || bestMove === 'pass') break;
+
+        line.push(bestMove);
+        currentMoves.push(player as string, bestMove);
+        player = player === ('B' as StoneColor)
+            ? ('W' as StoneColor)
+            : ('B' as StoneColor);
+    }
+
+    return line;
+};

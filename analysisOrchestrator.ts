@@ -1,5 +1,5 @@
 import { parseSGF } from './sgfParser';
-import { batchAnalyze } from './katagoService';
+import { batchAnalyze, buildPVLine } from './katagoService';
 import {
   sgfHash,
   loadGameAnalysis,
@@ -312,13 +312,65 @@ export async function analyzeGame(
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
 
   // ------------------------------------------------------------------
-  // 6b. Deep analysis of ambiguous positions (Phase D)
+  // 6a. Extend engine PV lines and build refutation lines for key moments
   // ------------------------------------------------------------------
+  // The proxy only returns 1-move PVs. For key moments we iteratively
+  // query the proxy to build longer engine lines (~6 moves) and, for
+  // mistakes/blunders, a refutation line showing opponent's punishment.
+
+  const PV_DEPTH = 6;
+  const MAX_PV_EXTENSIONS = 12; // cap total extra queries
 
   const estimatedLevel = playerLevel ?? estimatePlayerLevel(annotated);
 
   // Build a flat GTP move list for deep analysis to reuse
   const flatMoveList = buildMoveList(moves, totalMoves);
+
+  let pvExtensionsUsed = 0;
+  for (const ann of annotated) {
+    if (!ann.isKeyMoment || pvExtensionsUsed >= MAX_PV_EXTENSIONS) continue;
+
+    const movesBefore = flatMoveList.slice(0, (ann.moveNumber - 1) * 2);
+    const moverColor = moves[ann.moveNumber - 1].color as StoneColor;
+    const opponentColor: StoneColor =
+      moverColor === ('B' as StoneColor) ? ('W' as StoneColor) : ('B' as StoneColor);
+
+    // Extend engine PV: start from the engine's recommended move
+    if (ann.enginePV.length <= 1 && ann.engineTopMove) {
+      onProgress?.({
+        phase: 'semantic',
+        current: totalMoves,
+        total: totalMoves,
+        message: `Building engine line for move ${ann.moveNumber}...`,
+      });
+
+      const engineStart = [...movesBefore, moverColor as string, ann.engineTopMove];
+      const continuation = await buildPVLine(engineStart, opponentColor, PV_DEPTH - 1, komi);
+      ann.enginePV = [ann.engineTopMove, ...continuation];
+      pvExtensionsUsed += PV_DEPTH - 1;
+    }
+
+    // Build refutation PV for mistakes/blunders: what happens after the bad move
+    if (
+      (ann.classification === 'mistake' || ann.classification === 'blunder') &&
+      pvExtensionsUsed < MAX_PV_EXTENSIONS
+    ) {
+      onProgress?.({
+        phase: 'semantic',
+        current: totalMoves,
+        total: totalMoves,
+        message: `Building refutation line for move ${ann.moveNumber}...`,
+      });
+
+      const actualMove = moves[ann.moveNumber - 1].gtp;
+      const afterMistake = [...movesBefore, moverColor as string, actualMove];
+      const refutation = await buildPVLine(afterMistake, opponentColor, PV_DEPTH, komi);
+      if (refutation.length > 0) {
+        ann.refutationPV = refutation;
+      }
+      pvExtensionsUsed += PV_DEPTH;
+    }
+  }
 
   // Preliminary result for ambiguity detection (positions needed)
   const positions = analysisResults.filter(
