@@ -47,17 +47,17 @@ export const KEY_MOMENT_THRESHOLDS = {
 // ---------------------------------------------------------------------------
 
 /**
- * Classify a move based on the score delta between consecutive positions.
+ * Compute raw score/winrate deltas for a move.
  *
- * `evalBefore` is the KataGo analysis *before* the move was played (from the
- * mover's perspective). `evalAfter` is the analysis *after* the move.
+ * The KataGo proxy's `score` field has a systematic per-move drift
+ * (~-12 pts per move from the current player's POV). Raw scoreDelta
+ * values are therefore biased positive and MUST be normalized before
+ * classification. Use `normalizeAndClassify()` after collecting all
+ * raw deltas for the game.
  *
- * Score delta = evalAfter.scoreLead - evalBefore.scoreLead
- *   (positive means the mover improved their position)
- *
- * Because the proxy evaluates from the *current player's* perspective and the
- * current player flips each move, we negate evalAfter so both evals are from
- * the same (mover's) perspective.
+ * Returns a provisional classification based on raw deltas (for
+ * backward compatibility), but callers should prefer the normalized
+ * result from `normalizeAndClassify()`.
  */
 export function classifyMove(
   evalBefore: KataGoAnalysis,
@@ -74,17 +74,55 @@ export function classifyMove(
   const winrateAfter  = 1 - evalAfter.rootInfo.winrate;
   const winrateDelta  = winrateAfter - winrateBefore;
 
-  const t = CLASSIFICATION_THRESHOLDS;
-  let classification: MoveClassification;
-
-  if (scoreDelta > t.brilliant)        classification = 'brilliant';
-  else if (scoreDelta > t.good)        classification = 'good';
-  else if (scoreDelta > t.neutral)     classification = 'neutral';
-  else if (scoreDelta > t.inaccuracy)  classification = 'inaccuracy';
-  else if (scoreDelta > t.mistake)     classification = 'mistake';
-  else                                 classification = 'blunder';
-
+  // Provisional classification — will be overridden by normalizeAndClassify
+  const classification = classifyFromDelta(scoreDelta);
   return { classification, scoreDelta, winrateDelta };
+}
+
+/** Classify a single (normalized) score delta against thresholds. */
+function classifyFromDelta(delta: number): MoveClassification {
+  const t = CLASSIFICATION_THRESHOLDS;
+  if (delta > t.brilliant)        return 'brilliant';
+  if (delta > t.good)             return 'good';
+  if (delta > t.neutral)          return 'neutral';
+  if (delta > t.inaccuracy)       return 'inaccuracy';
+  if (delta > t.mistake)          return 'mistake';
+  return 'blunder';
+}
+
+/**
+ * Normalize and re-classify annotations for an entire game.
+ *
+ * The KataGo proxy's score values drift systematically with each move,
+ * producing inflated positive scoreDelta values. This function computes
+ * the median scoreDelta across the game (representing the "expected"
+ * gain of a typical move) and subtracts it before classifying.
+ *
+ * After normalization:
+ * - A move matching the median → scoreDelta ≈ 0 → "neutral"
+ * - A move gaining more than typical → positive → "good"/"brilliant"
+ * - A move gaining less than typical → negative → "inaccuracy"/"mistake"/"blunder"
+ */
+export function normalizeAndClassify(
+  annotations: SemanticAnnotation[],
+): SemanticAnnotation[] {
+  if (annotations.length === 0) return [];
+
+  // Compute median scoreDelta
+  const deltas = annotations.map(a => a.scoreDelta).sort((a, b) => a - b);
+  const mid = Math.floor(deltas.length / 2);
+  const median = deltas.length % 2 === 0
+    ? (deltas[mid - 1] + deltas[mid]) / 2
+    : deltas[mid];
+
+  return annotations.map(ann => {
+    const normalizedDelta = ann.scoreDelta - median;
+    return {
+      ...ann,
+      scoreDelta: normalizedDelta,
+      classification: classifyFromDelta(normalizedDelta),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

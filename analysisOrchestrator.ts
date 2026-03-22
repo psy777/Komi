@@ -9,6 +9,7 @@ import {
 } from './analysisCache';
 import {
   classifyMove,
+  normalizeAndClassify,
   detectMistakeType,
   detectGamePhase,
   detectThemes,
@@ -257,14 +258,22 @@ export async function analyzeGame(
   }
 
   // ------------------------------------------------------------------
-  // 5. Key moments
+  // 5. Normalize score deltas & re-classify
+  // ------------------------------------------------------------------
+  // The proxy's score drifts ~-12 pts/move, inflating all raw deltas.
+  // Subtract the median so classifications reflect relative quality.
+
+  const normalized = normalizeAndClassify(annotations);
+
+  // ------------------------------------------------------------------
+  // 6. Key moments
   // ------------------------------------------------------------------
 
-  const annotated = identifyKeyMoments(annotations);
+  const annotated = identifyKeyMoments(normalized);
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
 
   // ------------------------------------------------------------------
-  // 6. Summary
+  // 7. Summary
   // ------------------------------------------------------------------
 
   const estimatedLevel = playerLevel ?? estimatePlayerLevel(annotated);

@@ -15,7 +15,7 @@ import { createEmptyGrid, playMove } from './goLogic';
 import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
 import { batchAnalyze } from './katagoService';
-import { classifyMove, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
+import { classifyMove, normalizeAndClassify, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
@@ -351,7 +351,8 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
 
     for (const node of moveNodes) {
       const m = node.move!;
-      gtpMoves.push(`${m.color === StoneColor.BLACK ? 'B' : 'W'} ${toGtp(m.x, m.y)}`);
+      // Proxy expects flat ["B", "D4", "W", "Q16"] format, not ["B D4", "W Q16"]
+      gtpMoves.push(m.color === StoneColor.BLACK ? 'B' : 'W', toGtp(m.x, m.y));
       const nextPlayer = m.color === StoneColor.BLACK ? StoneColor.WHITE : StoneColor.BLACK;
       positions.push({ moves: [...gtpMoves], komi, currentPlayer: nextPlayer });
     }
@@ -415,10 +416,21 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
     }
 
+    // Normalize score deltas to remove proxy per-move drift, then re-classify
+    const normalized = normalizeAndClassify(annotations);
+
     // Identify key moments
-    const annotationsWithKeys = identifyKeyMoments(annotations);
+    const annotationsWithKeys = identifyKeyMoments(normalized);
     const keyMoments = annotationsWithKeys.filter(a => a.isKeyMoment);
     const playerLevel = estimatePlayerLevel(annotationsWithKeys);
+
+    // Recount classifications after normalization
+    for (const cls of Object.keys(classificationCounts)) {
+      classificationCounts[cls] = 0;
+    }
+    for (const ann of annotationsWithKeys) {
+      classificationCounts[ann.classification] = (classificationCounts[ann.classification] ?? 0) + 1;
+    }
 
     const result: FullGameAnalysis = {
       sgfHash: '',
