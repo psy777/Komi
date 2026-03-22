@@ -36,6 +36,20 @@ vi.mock('./goLogic', () => ({
     const cols = 'ABCDEFGHJKLMNOPQRST';
     return `${cols[x]}${19 - y}`;
   }),
+  createEmptyGrid: vi.fn(() => Array.from({ length: 19 }, () => Array(19).fill('.'))),
+  placeStone: vi.fn((_grid: any, _x: number, _y: number, _color: string) => ({ grid: _grid, captures: [] })),
+}));
+
+// Mock patternDetector — avoid needing full goLogic
+vi.mock('./patternDetector', () => ({
+  detectPatternsForGame: vi.fn(() => []),
+}));
+
+// Mock deepAnalysis — avoid network calls
+vi.mock('./deepAnalysis', () => ({
+  detectAmbiguousPositions: vi.fn(() => []),
+  exploreVariations: vi.fn(),
+  createBudget: vi.fn(() => ({ maxPositions: 0, maxCandidatesPerPosition: 3, includeResponses: false })),
 }));
 
 import { batchAnalyze } from './katagoService';

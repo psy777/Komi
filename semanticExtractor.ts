@@ -49,30 +49,27 @@ export const KEY_MOMENT_THRESHOLDS = {
 /**
  * Compute raw score/winrate deltas for a move.
  *
- * The KataGo proxy's `score` field has a systematic per-move drift
- * (~-12 pts per move from the current player's POV). Raw scoreDelta
- * values are therefore biased positive and MUST be normalized before
- * classification. Use `normalizeAndClassify()` after collecting all
- * raw deltas for the game.
+ * The KataGo proxy's score does not alternate perspective between
+ * players — empirically verified: passing does not change the score
+ * sign. The score has a constant per-move bias (~-12 pts per stone
+ * placed). We compute the simple difference `evalBefore - evalAfter`
+ * which yields `quality + constant_bias`. The constant bias is then
+ * removed by `normalizeAndClassify()`.
  *
- * Returns a provisional classification based on raw deltas (for
- * backward compatibility), but callers should prefer the normalized
+ * Returns a provisional classification based on raw deltas (biased by
+ * the per-move constant), but callers should prefer the normalized
  * result from `normalizeAndClassify()`.
  */
 export function classifyMove(
   evalBefore: KataGoAnalysis,
   evalAfter: KataGoAnalysis,
 ): { classification: MoveClassification; scoreDelta: number; winrateDelta: number } {
-  // evalBefore.rootInfo is from the mover's POV.
-  // evalAfter.rootInfo is from the *opponent's* POV (next player to move).
-  // Negate evalAfter to get mover's perspective.
-  const scoreBefore = evalBefore.rootInfo.scoreLead;
-  const scoreAfter  = -evalAfter.rootInfo.scoreLead;
-  const scoreDelta  = scoreAfter - scoreBefore;
-
-  const winrateBefore = evalBefore.rootInfo.winrate;
-  const winrateAfter  = 1 - evalAfter.rootInfo.winrate;
-  const winrateDelta  = winrateAfter - winrateBefore;
+  // The proxy's score is on a fixed scale (not alternating per player).
+  // A move that improves the mover's position causes evalAfter to be
+  // lower (more negative) than evalBefore, so the difference
+  // evalBefore - evalAfter is positive for good moves.
+  const scoreDelta  = evalBefore.rootInfo.scoreLead - evalAfter.rootInfo.scoreLead;
+  const winrateDelta = evalBefore.rootInfo.winrate - evalAfter.rootInfo.winrate;
 
   // Provisional classification — will be overridden by normalizeAndClassify
   const classification = classifyFromDelta(scoreDelta);
@@ -135,15 +132,23 @@ export function normalizeAndClassify(
  * Uses heuristics on the actual move vs engine top move, board region,
  * and evaluation changes. Returns undefined for non-mistakes or when
  * the data is insufficient to classify.
+ *
+ * Should be called AFTER normalizeAndClassify() so that classification
+ * and scoreDelta reflect the corrected (bias-removed) values.
+ *
+ * @param actualMove   - GTP coordinate of the played move
+ * @param engineTopMove - Engine's top recommended move
+ * @param classification - Normalized move classification
+ * @param scoreDelta   - Normalized score delta (positive = good for mover)
+ * @param moverWinrate - Raw winrate from evalBefore (mover's POV)
  */
 export function detectMistakeType(
   actualMove: string,
   engineTopMove: string,
-  evalBefore: KataGoAnalysis,
-  evalAfter: KataGoAnalysis,
+  classification: MoveClassification,
+  scoreDelta: number,
+  moverWinrate: number,
 ): MistakeType | undefined {
-  const { classification, scoreDelta } = classifyMove(evalBefore, evalAfter);
-
   // Only sub-classify mistakes and blunders
   if (classification !== 'mistake' && classification !== 'blunder' && classification !== 'inaccuracy') {
     return undefined;
@@ -173,7 +178,6 @@ export function detectMistakeType(
 
   // --- Overplay ---
   // Large negative scoreDelta when mover was already behind (winrate < 0.4)
-  const moverWinrate = evalBefore.rootInfo.winrate;
   if (moverWinrate < 0.4 && scoreDelta < CLASSIFICATION_THRESHOLDS.mistake) {
     return 'overplay';
   }
@@ -266,10 +270,9 @@ export function detectThemes(
 ): string[] {
   const themes: string[] = [];
 
-  const scoreDelta = -evalAfter.rootInfo.scoreLead - evalBefore.rootInfo.scoreLead;
-  const winrateBefore = evalBefore.rootInfo.winrate;
-  const winrateAfter = 1 - evalAfter.rootInfo.winrate;
-  const winrateDelta = winrateAfter - winrateBefore;
+  // Same fixed-scale convention as classifyMove: simple difference, no negation.
+  const scoreDelta = evalBefore.rootInfo.scoreLead - evalAfter.rootInfo.scoreLead;
+  const winrateDelta = evalBefore.rootInfo.winrate - evalAfter.rootInfo.winrate;
 
   // --- Momentum shift ---
   // Large winrate swing indicates a critical fighting moment

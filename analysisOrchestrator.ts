@@ -19,6 +19,9 @@ import {
 import { detectPatternsForGame } from './patternDetector';
 import { detectAmbiguousPositions, exploreVariations, createBudget } from './deepAnalysis';
 import { toGtpCoordinate } from './goLogic';
+import {
+  StoneColor,
+} from './types';
 import type {
   KataGoAnalysis,
   SemanticAnnotation,
@@ -28,7 +31,6 @@ import type {
   MoveClassification,
   GamePhase,
   PlayerLevel,
-  StoneColor,
   GameTree,
   DeepAnalysisBudget,
 } from './types';
@@ -240,13 +242,6 @@ export async function analyzeGame(
     const enginePV = evalBefore.moveInfos[0]?.pv ?? [];
     const actualMove = moves[i].gtp;
 
-    const mistakeType = detectMistakeType(
-      actualMove,
-      engineTopMove,
-      evalBefore,
-      evalAfter,
-    );
-
     // Approximate board occupancy from move count
     const boardOccupancy = (i + 1) / 361;
     const gamePhase = detectGamePhase(
@@ -260,8 +255,9 @@ export async function analyzeGame(
 
     annotations.push({
       moveNumber: i + 1,
+      color: moves[i].color === 'B' ? StoneColor.BLACK : StoneColor.WHITE,
       classification,
-      mistakeType,
+      // mistakeType is computed after normalization (see step 5b below)
       scoreDelta,
       winrateDelta,
       gamePhase,
@@ -278,10 +274,35 @@ export async function analyzeGame(
   // ------------------------------------------------------------------
   // 5. Normalize score deltas & re-classify
   // ------------------------------------------------------------------
-  // The proxy's score drifts ~-12 pts/move, inflating all raw deltas.
-  // Subtract the median so classifications reflect relative quality.
+  // The proxy score has a constant per-move bias (~+12 pts in the raw
+  // delta). Subtracting the median removes this bias so classifications
+  // reflect actual move quality.
 
   const normalized = normalizeAndClassify(annotations);
+
+  // ------------------------------------------------------------------
+  // 5b. Detect mistake types (requires normalized classifications)
+  // ------------------------------------------------------------------
+  // detectMistakeType must run AFTER normalization so it sees the
+  // corrected classification (not the bias-inflated provisional one).
+
+  for (let j = 0; j < normalized.length; j++) {
+    const ann = normalized[j];
+    const moveIdx = ann.moveNumber - 1;
+    const evalBefore = analysisResults[moveIdx];
+    if (!evalBefore) continue;
+
+    normalized[j] = {
+      ...ann,
+      mistakeType: detectMistakeType(
+        moves[moveIdx].gtp,
+        ann.engineTopMove,
+        ann.classification,
+        ann.scoreDelta,
+        evalBefore.rootInfo.winrate,
+      ),
+    };
+  }
 
   // ------------------------------------------------------------------
   // 6. Key moments

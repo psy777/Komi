@@ -167,6 +167,8 @@ export interface PatternInfo {
 /** Semantic annotation for a single move in a game */
 export interface SemanticAnnotation {
   moveNumber: number;
+  /** Color of the player who made this move */
+  color?: StoneColor;
   classification: MoveClassification;
   mistakeType?: MistakeType;
   scoreDelta: number;

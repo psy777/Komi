@@ -60,63 +60,67 @@ function makeAnnotation(overrides: Partial<SemanticAnnotation> = {}): SemanticAn
 // ---------------------------------------------------------------------------
 
 describe('classifyMove', () => {
-  it('classifies a neutral move (small score change)', () => {
-    // Before: mover leads by 2.0. After (opponent POV): opponent trails by 1.8
-    // scoreDelta = -(-1.8) - 2.0 = 1.8 - 2.0 = -0.2 → neutral
-    const before = makeEval({ scoreLead: 2.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -1.8, winrate: 0.45 }); // opponent POV
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('neutral');
-    expect(result.scoreDelta).toBeCloseTo(-0.2, 1);
-  });
+  // New formula: scoreDelta = evalBefore.scoreLead - evalAfter.scoreLead
+  // Positive delta = score dropped (good for mover). Negative = score rose (bad).
 
-  it('classifies a blunder (huge score loss)', () => {
-    // Before: mover leads by 5.0. After (opponent): opponent leads by 3.0
-    // scoreDelta = -(3.0) - 5.0 = -3.0 - 5.0 = -8.0 → blunder
-    const before = makeEval({ scoreLead: 5.0, winrate: 0.7 });
-    const after  = makeEval({ scoreLead: 3.0, winrate: 0.65 });
+  it('computes positive delta when score drops (good move)', () => {
+    // before: -10, after: -13 → delta = -10 - (-13) = 3.0 → brilliant
+    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
+    const after  = makeEval({ scoreLead: -13, winrate: 0.47 });
     const result = classifyMove(before, after);
-    expect(result.classification).toBe('blunder');
-    expect(result.scoreDelta).toBeLessThan(-5.0);
-  });
-
-  it('classifies a brilliant move (large positive delta)', () => {
-    // Before: mover leads by 1.0. After (opponent): opponent trails by 4.0
-    // scoreDelta = -(-4.0) - 1.0 = 4.0 - 1.0 = 3.0 → brilliant
-    const before = makeEval({ scoreLead: 1.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -4.0, winrate: 0.3 });
-    const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(3.0, 1);
     expect(result.classification).toBe('brilliant');
-    expect(result.scoreDelta).toBeGreaterThan(2.0);
+  });
+
+  it('computes negative delta when score rises (bad move)', () => {
+    // before: -10, after: -2 → delta = -10 - (-2) = -8.0 → blunder
+    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
+    const after  = makeEval({ scoreLead: -2, winrate: 0.55 });
+    const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(-8.0, 1);
+    expect(result.classification).toBe('blunder');
+  });
+
+  it('classifies near-zero delta as neutral', () => {
+    // before: -10, after: -10.3 → delta = 0.3 → neutral
+    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
+    const after  = makeEval({ scoreLead: -10.3, winrate: 0.49 });
+    const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(0.3, 1);
+    expect(result.classification).toBe('neutral');
   });
 
   it('classifies a mistake (moderate loss)', () => {
-    // scoreDelta = -(1.0) - 2.0 = -3.0 → mistake
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: 1.0 });
+    // before: -10, after: -7 → delta = -10 - (-7) = -3.0 → mistake
+    const before = makeEval({ scoreLead: -10 });
+    const after  = makeEval({ scoreLead: -7 });
     const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(-3.0, 1);
     expect(result.classification).toBe('mistake');
   });
 
   it('classifies an inaccuracy (small loss)', () => {
-    // scoreDelta = -(-0.5) - 2.0 = 0.5 - 2.0 = -1.5 → inaccuracy
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: -0.5 });
+    // before: -10, after: -8.5 → delta = -10 - (-8.5) = -1.5 → inaccuracy
+    const before = makeEval({ scoreLead: -10 });
+    const after  = makeEval({ scoreLead: -8.5 });
     const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(-1.5, 1);
     expect(result.classification).toBe('inaccuracy');
   });
 
   it('classifies a good move', () => {
-    // scoreDelta = -(- 2.0) - 1.0 = 2.0 - 1.0 = 1.0 → good
-    const before = makeEval({ scoreLead: 1.0 });
-    const after  = makeEval({ scoreLead: -2.0 });
+    // before: -10, after: -11 → delta = -10 - (-11) = 1.0 → good
+    const before = makeEval({ scoreLead: -10 });
+    const after  = makeEval({ scoreLead: -11 });
     const result = classifyMove(before, after);
+    expect(result.scoreDelta).toBeCloseTo(1.0, 1);
     expect(result.classification).toBe('good');
   });
 
   it('computes winrate delta correctly', () => {
+    // winrateDelta = before.winrate - after.winrate
     const before = makeEval({ scoreLead: 0, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: 0, winrate: 0.4 }); // opponent has 0.4 → mover has 0.6
+    const after  = makeEval({ scoreLead: 0, winrate: 0.4 });
     const result = classifyMove(before, after);
     expect(result.winrateDelta).toBeCloseTo(0.1, 2);
   });
@@ -127,66 +131,46 @@ describe('classifyMove', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectMistakeType', () => {
+  // New signature: detectMistakeType(actualMove, engineTopMove, classification, scoreDelta, moverWinrate)
+
   it('returns undefined for non-mistakes', () => {
-    const before = makeEval({ scoreLead: 1.0 });
-    const after  = makeEval({ scoreLead: -1.2 }); // small positive delta
-    const result = detectMistakeType('D4', 'D4', before, after);
+    const result = detectMistakeType('D4', 'D4', 'good', 1.0, 0.5);
     expect(result).toBeUndefined();
   });
 
   it('detects direction error (different board region)', () => {
     // Played in top-left, engine wanted bottom-right → direction
-    const before = makeEval({ scoreLead: 3.0 });
-    const after  = makeEval({ scoreLead: 0.0 }); // scoreDelta = 0 - 3 = -3 → mistake
-    const result = detectMistakeType('C17', 'R3', before, after);
+    const result = detectMistakeType('C17', 'R3', 'mistake', -3.0, 0.5);
     expect(result).toBe('direction');
   });
 
   it('detects timing error (large distance between moves)', () => {
-    // Played at D4, engine wanted D16 — same column but far apart
-    const before = makeEval({ scoreLead: 3.0 });
-    const after  = makeEval({ scoreLead: 0.0 });
-    const result = detectMistakeType('D4', 'D16', before, after);
+    // Both A19 and A10 are in the top-left region but far apart (distance=9 > 8)
+    const result = detectMistakeType('A19', 'A10', 'mistake', -3.0, 0.5);
     expect(result).toBe('timing');
   });
 
   it('detects shape error (close moves, same region)', () => {
     // Played D4, engine wanted E5 — very close, same region → shape
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: 0.7 }); // scoreDelta = -0.7 - 2.0 = -2.7 → mistake
-    const result = detectMistakeType('D4', 'E5', before, after);
+    const result = detectMistakeType('D4', 'E5', 'mistake', -2.7, 0.5);
     expect(result).toBe('shape');
   });
 
   it('detects overplay (losing side plays aggressively)', () => {
     // Mover was behind (winrate 0.3), blunders further
-    const before = makeEval({ scoreLead: -5.0, winrate: 0.3 });
-    const after  = makeEval({ scoreLead: 3.0 }); // scoreDelta = -3 - (-5) = -3+5= ... wait
-    // scoreDelta = -(3.0) - (-5.0) = -3 + 5 = 2.0 that's positive... need bigger loss
-    // Let's make it clearer: before scoreLead = -3 (behind), after opponent has +10
-    const before2 = makeEval({ scoreLead: -3.0, winrate: 0.3 });
-    const after2  = makeEval({ scoreLead: 10.0 }); // scoreDelta = -10 - (-3) = -7 → blunder
-    const result = detectMistakeType('D4', 'E5', before2, after2);
+    const result = detectMistakeType('D4', 'E5', 'blunder', -7.0, 0.3);
     expect(result).toBe('overplay');
   });
 
   it('detects passivity (winning side loses advantage)', () => {
-    const before = makeEval({ scoreLead: 8.0, winrate: 0.75 });
-    const after  = makeEval({ scoreLead: -4.0 }); // scoreDelta = 4.0 - 8.0 = -4.0 → mistake
-    // Mover was ahead (0.75) and lost ground → passivity
-    const result = detectMistakeType('D4', 'E5', before, after);
+    // Mover was ahead (winrate 0.75) and lost ground → passivity
+    const result = detectMistakeType('D4', 'E5', 'mistake', -4.0, 0.75);
     expect(result).toBe('passivity');
   });
 
   it('defaults to reading for ambiguous mistakes', () => {
-    // Same region, not particularly close or far, moderate loss
-    const before = makeEval({ scoreLead: 2.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -1.0 }); // scoreDelta = 1.0 - 2.0 = -1.0... that's inaccuracy not mistake
-    // Need bigger loss in same region
-    const before2 = makeEval({ scoreLead: 4.0, winrate: 0.55 });
-    const after2  = makeEval({ scoreLead: 2.0 }); // scoreDelta = -2 - 4 = -6 → blunder
-    // D10 and F8 are both center-ish, ~4 apart
-    const result = detectMistakeType('D10', 'F8', before2, after2);
+    // D4 and H4 are both bottom-left region, distance=4 (not shape ≤3, not timing >8)
+    const result = detectMistakeType('D4', 'H4', 'blunder', -6.0, 0.55);
     expect(result).toBe('reading');
   });
 });
@@ -237,9 +221,9 @@ describe('detectGamePhase', () => {
 
 describe('detectThemes', () => {
   it('detects momentum_shift on large winrate change', () => {
+    // New formula: winrateDelta = before - after = 0.4 - 0.8 = -0.4, |delta| > 0.1
     const before = makeEval({ winrate: 0.4 });
-    const after  = makeEval({ winrate: 0.8 }); // opponent 0.8 → mover 0.2, delta = -0.2
-    // Actually: winrateAfter (mover) = 1 - 0.8 = 0.2, delta = 0.2 - 0.4 = -0.2 → |delta| > 0.1
+    const after  = makeEval({ winrate: 0.8 });
     const themes = detectThemes(before, after);
     expect(themes).toContain('momentum_shift');
   });
@@ -257,8 +241,9 @@ describe('detectThemes', () => {
   });
 
   it('detects endgame_technique for late small-delta moves', () => {
-    const before = makeEval({ scoreLead: 3.0, turnNumber: 200 });
-    const after  = makeEval({ scoreLead: -3.5 }); // delta = 3.5 - 3.0 = 0.5
+    // New formula: delta = before - after. Small |delta| + late game → endgame technique
+    const before = makeEval({ scoreLead: -20.0, turnNumber: 200 });
+    const after  = makeEval({ scoreLead: -20.5 }); // delta = -20.0 - (-20.5) = 0.5
     const themes = detectThemes(before, after);
     expect(themes).toContain('endgame_technique');
   });
