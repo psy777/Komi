@@ -694,7 +694,7 @@ const App: React.FC = () => {
             <h1 className="text-2xl font-bold italic tracking-tight text-white font-google">komi</h1>
         </div>
         
-        <div className="flex items-center gap-2 md:gap-4">
+        <div className="flex items-center gap-1 sm:gap-2 md:gap-4">
             <label className="flex items-center gap-1.5 cursor-pointer hover:bg-slate-800 text-slate-400 hover:text-white px-3 py-1.5 rounded-lg transition-all text-xs font-semibold">
                 <FaFolderOpen className="text-emerald-400" />
                 <span className="hidden sm:inline">Open</span>
@@ -726,8 +726,8 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col md:flex-row overflow-hidden bg-slate-950">
         
         {/* Left Panel: Board (Priority - maximized space) */}
-        <div className="flex-1 flex flex-col min-w-0 relative">
-            <div className="flex-1 overflow-hidden flex items-center justify-center p-2 sm:p-4">
+        <div className="h-[50vh] md:h-auto flex-none md:flex-1 flex flex-col min-w-0 relative">
+            <div className="flex-1 overflow-hidden flex items-center justify-center p-1 sm:p-4">
                  <GoBoard
                     grid={boardState.grid}
                     lastMove={boardState.lastMove}
@@ -741,11 +741,11 @@ const App: React.FC = () => {
         </div>
 
         {/* Sidebar Docked Layout */}
-        <div className="w-full md:w-[400px] bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 flex flex-col shrink-0 z-20 h-auto md:h-full">
+        <div className="w-full md:w-[400px] bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 flex flex-col z-20 flex-1 md:flex-none overflow-y-auto md:overflow-hidden md:h-full">
             
             {/* Analysis Panel */}
             {(analysisProgress || analysisResult) && (
-              <div className="p-3 space-y-2 border-b border-slate-800 overflow-y-auto max-h-[50%] shrink-0">
+              <div className="p-2 sm:p-3 space-y-2 border-b border-slate-800 overflow-y-auto max-h-[40vh] md:max-h-[50%] shrink-0">
                 {analysisProgress && (
                   <AnalysisProgress progress={analysisProgress} result={analysisResult} />
                 )}
@@ -807,7 +807,7 @@ const App: React.FC = () => {
             )}
 
             {/* Chat History Section (Expands UPWARD on mobile) */}
-            <div className={`flex-1 overflow-hidden bg-slate-950/20 flex flex-col transition-all duration-300 ease-in-out ${chatExpanded ? 'h-[250px] md:h-full opacity-100' : 'h-0 opacity-0 md:opacity-100 md:h-full'}`}>
+            <div className={`flex-1 overflow-hidden bg-slate-950/20 flex flex-col transition-all duration-300 ease-in-out ${chatExpanded ? 'h-[180px] md:h-full opacity-100' : 'h-0 opacity-0 md:opacity-100 md:h-full'}`}>
                  <GeminiChat 
                     currentNodeId={gameTree.currentId}
                     gameTree={gameTree}
@@ -848,7 +848,7 @@ const App: React.FC = () => {
                  />
 
                 {/* Navigation Controls (Absolute Bottom of UI) */}
-                <div className="p-3 bg-slate-900 flex flex-col gap-2 shrink-0">
+                <div className="p-2 sm:p-3 bg-slate-900 flex flex-col gap-2 shrink-0">
                     <div className="flex items-center justify-between gap-1 max-w-sm mx-auto w-full">
                         <button onClick={handleFirst} className="p-2 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-white transition-all" title="Start"><FaStepBackward size={14}/></button>
                         <button onClick={handlePrev} className="p-2 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-white transition-all" title="Back"><FaChevronLeft size={16}/></button>
