@@ -130,8 +130,8 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
                 strokeWidth={2}
               />
             )}
-            {/* Classification Annotation Ring */}
-            {moveAnnotations && (() => {
+            {/* Classification Annotation Ring — only on last move */}
+            {moveAnnotations && lastMove && lastMove.x === x && lastMove.y === y && (() => {
               const ann = moveAnnotations.find(a => a.x === x && a.y === y);
               if (!ann || ann.classification === 'neutral' || ann.classification === 'good') return null;
               return (
