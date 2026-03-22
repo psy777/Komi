@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes, FaLink } from 'react-icons/fa';
+import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes, FaCamera, FaLink } from 'react-icons/fa';
 import GoBoard from './GoBoard';
 import type { MoveAnnotation, PVStone } from './GoBoard';
 import GeminiChat from './GeminiChat';
@@ -18,7 +18,11 @@ import { batchAnalyze } from './katagoService';
 import { classifyMove, normalizeAndClassify, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
-const App: React.FC = () => {
+interface AppProps {
+  onOpenScorer?: () => void;
+}
+
+const App: React.FC<AppProps> = ({ onOpenScorer }) => {
   // --- State ---
   const [gameTree, setGameTree] = useState<GameTree>(() => {
     const rootId = uuidv4();
@@ -719,6 +723,15 @@ const App: React.FC = () => {
             >
               {isAnalyzing ? 'Analyzing...' : 'Analyze Game'}
             </button>
+            {onOpenScorer && (
+              <button
+                onClick={onOpenScorer}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white"
+              >
+                <FaCamera size={11} />
+                <span className="hidden sm:inline">Score Photo</span>
+              </button>
+            )}
         </div>
       </header>
 
