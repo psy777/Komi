@@ -105,7 +105,7 @@ export async function scoreBoardImage(
   komi: number = 6.5
 ): Promise<ImageScoringResult> {
   const rawResponse = await geminiGenerate(
-    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash",
     [
       {
         role: "user",
