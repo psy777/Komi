@@ -144,6 +144,8 @@ export interface FullGameAnalysis {
   annotations: SemanticAnnotation[];
   keyMoments: SemanticAnnotation[];
   summary: AnalysisSummary;
+  /** Deep analysis of ambiguous positions (Phase D) */
+  deepAnalysis?: DeepAnalysisResult;
   analyzedAt: number;
 }
 
@@ -191,4 +193,101 @@ export interface MistakeExplanation {
   winrateDelta: number;
   gamePhase: GamePhase;
   explanation: string | null;
+}
+
+// --- Tutoring Pipeline Types (Phase B) ---
+
+/** Structured tutoring output from the Gemini prompt pipeline */
+export interface TutoringExplanation {
+  moveNumber: number;
+  playerLevel: PlayerLevel;
+  /** One-line summary, e.g. "Black's attachment was too aggressive" */
+  headline: string;
+  /** Main NL explanation (2-4 paragraphs, level-adapted) */
+  explanation: string;
+  /** Description of the actual move in context */
+  whatWasPlayed: string;
+  /** Description of the engine's recommendation (omitted for good/brilliant moves) */
+  whatWasBetter?: string;
+  /** Go concept being taught, e.g. "shape", "direction of play" */
+  concept?: string;
+  /** Prompt for deeper exploration, e.g. "What happens after the cut at D10?" */
+  followUpHint?: string;
+}
+
+/** Input context assembled by the tutoring pipeline's context builder */
+export interface TutoringContext {
+  annotation: SemanticAnnotation;
+  playerLevel: PlayerLevel;
+  /** Board state serialized as relevant context (move sequence, score, etc.) */
+  gameContext: {
+    totalMoves: number;
+    komi: number;
+    currentScore: number;
+    currentWinrate: number;
+  };
+  /** Pattern info from boardmatcher, if detected */
+  pattern?: PatternInfo;
+  /** Top engine alternatives with scores */
+  engineAlternatives: Array<{ move: string; scoreLead: number; winrate: number }>;
+  /** Neighboring annotations for narrative flow (previous/next key moments) */
+  surroundingMoments?: {
+    previous?: { moveNumber: number; classification: MoveClassification };
+    next?: { moveNumber: number; classification: MoveClassification };
+  };
+  /** Deep analysis results for ambiguous positions (Phase D) */
+  deepAnalysis?: VariationExploration;
+}
+
+// --- Deep Analysis Types (Phase D) ---
+
+/** Evaluation of a single candidate continuation */
+export interface VariationEval {
+  /** The candidate move played */
+  move: string;
+  /** Score lead after this move (from mover's POV) */
+  scoreLead: number;
+  /** Win rate after this move */
+  winrate: number;
+  /** Engine's best response to this candidate */
+  bestResponse?: string;
+  /** Score after best response */
+  scoreAfterResponse?: number;
+}
+
+/** Deep analysis of an ambiguous position — compares candidate continuations */
+export interface VariationExploration {
+  moveNumber: number;
+  /** Why this position was flagged for deeper analysis */
+  reason: 'close_candidates' | 'complex_fighting' | 'critical_moment';
+  /** Score gap between top-2 candidates (smaller = more ambiguous) */
+  ambiguityGap: number;
+  /** Evaluated candidate continuations */
+  variations: VariationEval[];
+  /** Which candidate comes out best after deeper analysis */
+  bestVariation: string;
+  /** Score difference between best and worst explored variation */
+  variationSpread: number;
+}
+
+/** Budget configuration for deep analysis */
+export interface DeepAnalysisBudget {
+  /** Max positions to explore (default 8) */
+  maxPositions: number;
+  /** Max candidate moves to evaluate per position (default 3) */
+  maxCandidatesPerPosition: number;
+  /** Whether to also query the opponent's response (doubles API calls) */
+  includeResponses: boolean;
+}
+
+/** Full result of the deep analysis pass */
+export interface DeepAnalysisResult {
+  /** Map from move number to its variation exploration */
+  explorations: Map<number, VariationExploration>;
+  /** Total KataGo API calls made */
+  apiCallsUsed: number;
+  /** Positions that were identified as ambiguous */
+  ambiguousCount: number;
+  /** Positions actually explored (may be less than ambiguous due to budget) */
+  exploredCount: number;
 }

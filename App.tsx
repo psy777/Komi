@@ -7,7 +7,7 @@ import GeminiChat from './GeminiChat';
 import AnalysisProgress from './AnalysisProgress';
 import ScoreGraph from './ScoreGraph';
 import KeyMomentNav from './KeyMomentNav';
-import MistakePanel from './MistakePanel';
+import TutoringPanel from './TutoringPanel';
 import { clearExplanationCache } from './mistakeExplainer';
 import ConceptTagFilter from './ConceptTagFilter';
 import { StoneColor, BoardState, GameTree, GameNode, ChatMessage, AnalysisProgressData, FullGameAnalysis, SemanticAnnotation } from './types';
@@ -548,11 +548,11 @@ const App: React.FC = () => {
     return moves;
   }, [analysisResult, activeThemes]);
 
-  // Selected annotation for MistakePanel (non-neutral/non-good move at current position)
+  // Selected annotation for TutoringPanel (any key moment at current position)
   const selectedAnnotation = React.useMemo(() => {
     if (!analysisResult) return null;
     const ann = analysisResult.annotations.find(a => a.moveNumber === currentDepth);
-    if (!ann || ann.classification === 'neutral' || ann.classification === 'good') return null;
+    if (!ann || !ann.isKeyMoment) return null;
     return ann;
   }, [analysisResult, currentDepth]);
 
@@ -794,11 +794,13 @@ const App: React.FC = () => {
                       onShowPV={handleShowPV}
                     />
                     {selectedAnnotation && (
-                      <MistakePanel
+                      <TutoringPanel
                         annotation={selectedAnnotation}
                         playedMove={selectedPlayedMove}
                         playerLevel={analysisResult.playerLevel}
+                        analysis={analysisResult}
                         onShowEngineLine={() => handleShowPV(selectedAnnotation)}
+                        onNavigateToMove={handleJumpToMove}
                       />
                     )}
                   </>

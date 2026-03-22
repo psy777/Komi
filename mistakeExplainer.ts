@@ -1,5 +1,12 @@
-import type { SemanticAnnotation, MistakeExplanation, PlayerLevel } from './types';
+import type {
+  SemanticAnnotation,
+  MistakeExplanation,
+  PlayerLevel,
+  FullGameAnalysis,
+  TutoringExplanation,
+} from './types';
 import { generateKeyMomentCommentary } from './geminiService';
+import { generateTutoringExplanation, clearTutoringCache } from './tutoringPipeline';
 
 // Session-level cache: moveNumber -> explanation text
 const explanationCache = new Map<number, string>();
@@ -44,8 +51,41 @@ export async function generateExplanation(
 }
 
 /**
- * Clear the explanation cache (call when loading a new game or re-analyzing).
+ * Generate a rich, structured tutoring explanation using the Phase B pipeline.
+ *
+ * Requires the full game analysis context for richer prompts.
+ * Falls back to the simple generateExplanation path if analysis is unavailable.
+ */
+export async function generateRichExplanation(
+  annotation: SemanticAnnotation,
+  playerLevel: PlayerLevel,
+  analysis?: FullGameAnalysis,
+  userQuestion?: string,
+): Promise<TutoringExplanation> {
+  if (!analysis) {
+    // Fallback: use legacy path and wrap in TutoringExplanation shape
+    const text = await generateExplanation(annotation, playerLevel);
+    return {
+      moveNumber: annotation.moveNumber,
+      playerLevel,
+      headline: `Move ${annotation.moveNumber}: ${annotation.classification}`,
+      explanation: text,
+      whatWasPlayed: '',
+    };
+  }
+
+  return generateTutoringExplanation(
+    annotation.moveNumber,
+    analysis,
+    playerLevel,
+    userQuestion,
+  );
+}
+
+/**
+ * Clear all explanation caches (call when loading a new game or re-analyzing).
  */
 export function clearExplanationCache(): void {
   explanationCache.clear();
+  clearTutoringCache();
 }

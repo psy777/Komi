@@ -17,6 +17,7 @@ import {
   estimatePlayerLevel,
 } from './semanticExtractor';
 import { detectPatternsForGame } from './patternDetector';
+import { detectAmbiguousPositions, exploreVariations, createBudget } from './deepAnalysis';
 import { toGtpCoordinate } from './goLogic';
 import type {
   KataGoAnalysis,
@@ -29,6 +30,7 @@ import type {
   PlayerLevel,
   StoneColor,
   GameTree,
+  DeepAnalysisBudget,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,7 @@ export async function analyzeGame(
   sgfContent: string,
   playerLevel?: PlayerLevel,
   onProgress?: (progress: AnalysisProgressData) => void,
+  deepAnalysisBudget?: Partial<DeepAnalysisBudget>,
 ): Promise<FullGameAnalysis> {
   const hash = sgfHash(sgfContent);
 
@@ -288,10 +291,63 @@ export async function analyzeGame(
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
 
   // ------------------------------------------------------------------
-  // 7. Summary
+  // 6b. Deep analysis of ambiguous positions (Phase D)
   // ------------------------------------------------------------------
 
   const estimatedLevel = playerLevel ?? estimatePlayerLevel(annotated);
+
+  // Build a flat GTP move list for deep analysis to reuse
+  const flatMoveList = buildMoveList(moves, totalMoves);
+
+  // Preliminary result for ambiguity detection (positions needed)
+  const positions = analysisResults.filter(
+    (r): r is KataGoAnalysis => r !== null,
+  );
+
+  const prelimResult: FullGameAnalysis = {
+    sgfHash: hash,
+    playerLevel: estimatedLevel,
+    positions,
+    annotations: annotated,
+    keyMoments,
+    summary: { totalMoves, classificationCounts: {} as any, phaseBreakdown: {} as any, themes: [] },
+    analyzedAt: Date.now(),
+  };
+
+  let deepAnalysisResult = undefined;
+  const budget = createBudget(deepAnalysisBudget);
+
+  if (budget.maxPositions > 0) {
+    const ambiguous = detectAmbiguousPositions(prelimResult);
+
+    if (ambiguous.length > 0) {
+      onProgress?.({
+        phase: 'semantic',
+        current: totalMoves,
+        total: totalMoves,
+        message: `Exploring ${Math.min(ambiguous.length, budget.maxPositions)} ambiguous positions...`,
+      });
+
+      deepAnalysisResult = await exploreVariations(
+        ambiguous,
+        flatMoveList,
+        komi,
+        budget,
+        (completed, total) => {
+          onProgress?.({
+            phase: 'semantic',
+            current: totalMoves,
+            total: totalMoves,
+            message: `Deep analysis: ${completed}/${total} variations`,
+          });
+        },
+      );
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 7. Summary
+  // ------------------------------------------------------------------
 
   const classificationCounts = {} as Record<MoveClassification, number>;
   for (const cls of [
@@ -332,11 +388,6 @@ export async function analyzeGame(
     themes: allThemes,
   };
 
-  // Collect valid engine positions (non-null results)
-  const positions = analysisResults.filter(
-    (r): r is KataGoAnalysis => r !== null,
-  );
-
   const result: FullGameAnalysis = {
     sgfHash: hash,
     playerLevel: estimatedLevel,
@@ -344,6 +395,7 @@ export async function analyzeGame(
     annotations: annotated,
     keyMoments,
     summary,
+    deepAnalysis: deepAnalysisResult,
     analyzedAt: Date.now(),
   };
 
