@@ -11,6 +11,14 @@ import { runGoAgentReview } from './goAgent.js';
 import db from './db.js';
 import { initReviewQueue, enqueueGame, queueStatus } from './reviewQueue.js';
 import {
+  ogsResolvePlayer,
+  ogsListRecentGames,
+  ogsFetchSgf,
+  parseOgsGameId,
+  LINKABLE_SERVERS,
+} from './gameServers.js';
+import { registerCommunityRoutes } from './communityRoutes.js';
+import {
   hashPassword,
   verifyPassword,
   createSession,
@@ -261,33 +269,61 @@ app.get('/api/katago/health', async (_req, res) => {
 // --- Auth ----------------------------------------------------------------
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const USERNAME_RE = /^[a-zA-Z0-9_-]{3,20}$/;
 
 function publicUser(u) {
-  return { id: u.id, email: u.email, createdAt: u.created_at };
+  return {
+    id: u.id,
+    email: u.email,
+    username: u.username ?? null,
+    points: u.points ?? 0,
+    role: u.role ?? 'user',
+    createdAt: u.created_at,
+  };
 }
 
 app.post('/api/auth/register', (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
+    const username = String(req.body?.username || '').trim();
     if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Invalid email' });
     if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (!USERNAME_RE.test(username)) {
+      return res.status(400).json({ error: 'Username must be 3-20 characters (letters, numbers, - or _)' });
+    }
 
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existing) return res.status(409).json({ error: 'Email already registered' });
+    const nameTaken = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').get(username);
+    if (nameTaken) return res.status(409).json({ error: 'Username already taken' });
 
     const info = db
-      .prepare('INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)')
-      .run(email, hashPassword(password), Date.now());
+      .prepare('INSERT INTO users (email, password_hash, username, created_at) VALUES (?, ?, ?, ?)')
+      .run(email, hashPassword(password), username, Date.now());
     const userId = Number(info.lastInsertRowid);
 
     const { token, expiresAt } = createSession(userId);
     setSessionCookie(res, token, expiresAt);
-    res.json({ user: publicUser({ id: userId, email, created_at: Date.now() }) });
+    res.json({ user: publicUser({ id: userId, email, username, created_at: Date.now() }) });
   } catch (err) {
     console.error('register error:', err.message);
     res.status(500).json({ error: 'Registration failed' });
   }
+});
+
+// Pre-username accounts pick a name on next visit.
+app.post('/api/auth/username', requireAuth, (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  if (!USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: 'Username must be 3-20 characters (letters, numbers, - or _)' });
+  }
+  const taken = db
+    .prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE AND id != ?')
+    .get(username, req.user.id);
+  if (taken) return res.status(409).json({ error: 'Username already taken' });
+  db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.user.id);
+  res.json({ ok: true, username });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -332,7 +368,18 @@ function sgfMeta(sgf) {
     whiteName: prop('PW'),
     blackRank: prop('BR'),
     whiteRank: prop('WR'),
+    size: Number(prop('SZ') || 19),
   };
+}
+
+// The review pipeline (engine queries, coordinates, occupancy heuristics) is
+// 19x19-only today; reject other sizes at intake instead of reviewing garbage.
+function rejectNon19(meta, res) {
+  if (meta.size !== 19) {
+    res.status(400).json({ error: `Only 19×19 games can be reviewed right now (this one is ${meta.size}×${meta.size})` });
+    return true;
+  }
+  return false;
 }
 
 function gameRow(row, includeBody) {
@@ -379,14 +426,15 @@ app.post('/api/games', requireAuth, (req, res) => {
     const sgf = String(req.body?.sgf || '');
     if (!sgf) return res.status(400).json({ error: 'sgf is required' });
     if (sgf.length > 1_000_000) return res.status(400).json({ error: 'SGF too large' });
-    const isPublic = req.body?.isPublic === false ? 0 : 1;
+    const meta = sgfMeta(sgf);
     const analysis = req.body?.analysis ? JSON.stringify(req.body.analysis) : null;
+    if (!analysis && rejectNon19(meta, res)) return;
+    const isPublic = req.body?.isPublic === false ? 0 : 1;
     const status = analysis ? 'ready' : 'pending';
     let source = String(req.body?.source || 'upload');
     if (!GAME_SOURCES.has(source)) source = 'upload';
     if (analysis) source = 'client';
     if (source === 'curated' && req.user.role !== 'admin') source = 'upload';
-    const meta = sgfMeta(sgf);
     const now = Date.now();
     const info = db
       .prepare(
@@ -492,6 +540,107 @@ app.delete('/api/games/:id', requireAuth, (req, res) => {
   db.prepare('DELETE FROM games WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
+
+// --- Linked game-server accounts ------------------------------------------
+
+app.get('/api/me/accounts', requireAuth, (req, res) => {
+  const rows = db
+    .prepare('SELECT server, handle, created_at FROM linked_accounts WHERE user_id = ?')
+    .all(req.user.id);
+  res.json({ accounts: rows.map((r) => ({ server: r.server, handle: r.handle, linkedAt: r.created_at })) });
+});
+
+app.post('/api/me/accounts', requireAuth, async (req, res) => {
+  try {
+    const server = String(req.body?.server || '').toLowerCase();
+    const handle = String(req.body?.handle || '').trim().slice(0, 40);
+    if (!LINKABLE_SERVERS.has(server)) return res.status(400).json({ error: 'Unknown server' });
+    if (!handle) return res.status(400).json({ error: 'Handle is required' });
+
+    // For OGS we can verify the account exists (and normalize its casing).
+    let stored = handle;
+    if (server === 'ogs') {
+      const player = await ogsResolvePlayer(handle);
+      if (!player) return res.status(404).json({ error: `No OGS player named "${handle}"` });
+      stored = player.username;
+    }
+
+    db.prepare(
+      `INSERT INTO linked_accounts (user_id, server, handle, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, server) DO UPDATE SET handle = excluded.handle, created_at = excluded.created_at`,
+    ).run(req.user.id, server, stored, Date.now());
+    res.json({ ok: true, server, handle: stored });
+  } catch (err) {
+    console.error('link account error:', err.message);
+    res.status(502).json({ error: 'Could not verify the account right now' });
+  }
+});
+
+app.delete('/api/me/accounts/:server', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM linked_accounts WHERE user_id = ? AND server = ?').run(
+    req.user.id,
+    String(req.params.server).toLowerCase(),
+  );
+  res.json({ ok: true });
+});
+
+// --- OGS browsing & import -------------------------------------------------
+
+// Recent finished games for an OGS handle (defaults to the caller's linked one).
+app.get('/api/ogs/games', requireAuth, async (req, res) => {
+  try {
+    let handle = String(req.query.handle || '').trim();
+    if (!handle) {
+      const linked = db
+        .prepare("SELECT handle FROM linked_accounts WHERE user_id = ? AND server = 'ogs'")
+        .get(req.user.id);
+      if (!linked) return res.status(400).json({ error: 'No OGS account linked' });
+      handle = linked.handle;
+    }
+    const player = await ogsResolvePlayer(handle);
+    if (!player) return res.status(404).json({ error: `No OGS player named "${handle}"` });
+    const games = await ogsListRecentGames(player.id, Number(req.query.limit) || 20);
+    res.json({ player, games });
+  } catch (err) {
+    console.error('ogs games error:', err.message);
+    res.status(502).json({ error: 'OGS is not reachable right now' });
+  }
+});
+
+// Import one OGS game by id or URL: fetch the SGF server-side and queue it.
+app.post('/api/games/import/ogs', requireAuth, async (req, res) => {
+  try {
+    const gameId = parseOgsGameId(req.body?.game);
+    if (!gameId) return res.status(400).json({ error: 'Provide an OGS game id or URL' });
+
+    const existing = db
+      .prepare("SELECT id, status FROM games WHERE owner_id = ? AND source = 'ogs' AND title LIKE ?")
+      .get(req.user.id, `%#${gameId}`);
+    if (existing) return res.json({ id: existing.id, status: existing.status, duplicate: true });
+
+    const sgf = await ogsFetchSgf(gameId);
+    const meta = sgfMeta(sgf);
+    if (rejectNon19(meta, res)) return;
+    const title = `${meta.blackName ?? 'Black'} vs ${meta.whiteName ?? 'White'} — OGS #${gameId}`;
+    const now = Date.now();
+    const info = db
+      .prepare(
+        `INSERT INTO games (owner_id, title, sgf, is_public, created_at, updated_at,
+         status, source, analysis_phase, black_name, white_name, black_rank, white_rank)
+         VALUES (?, ?, ?, 1, ?, ?, 'pending', 'ogs', 'queued', ?, ?, ?, ?)`,
+      )
+      .run(req.user.id, title, sgf, now, now, meta.blackName, meta.whiteName, meta.blackRank, meta.whiteRank);
+    const id = Number(info.lastInsertRowid);
+    enqueueGame(id);
+    res.json({ id, status: 'pending' });
+  } catch (err) {
+    console.error('ogs import error:', err.message);
+    const status = err.status === 404 ? 404 : 502;
+    res.status(status).json({ error: err.message || 'OGS import failed' });
+  }
+});
+
+registerCommunityRoutes(app);
 
 // In production, serve the built Vite app
 if (process.env.NODE_ENV === 'production') {
