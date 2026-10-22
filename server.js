@@ -9,6 +9,7 @@ import { analyzeGame, analyzePosition, isAvailable, engineHealth } from './katag
 import { llmGenerate, llmInfo } from './llmProvider.js';
 import { runGoAgentReview } from './goAgent.js';
 import db from './db.js';
+import { initReviewQueue, enqueueGame, queueStatus } from './reviewQueue.js';
 import {
   hashPassword,
   verifyPassword,
@@ -319,6 +320,21 @@ app.get('/api/auth/me', (req, res) => {
 
 // --- Games ---------------------------------------------------------------
 
+// Root-property metadata straight off the SGF text (names, ranks) for
+// library listings — no full parse needed.
+function sgfMeta(sgf) {
+  const prop = (name) => {
+    const m = sgf.match(new RegExp(`${name}\\[([^\\]]*)\\]`));
+    return m ? m[1].trim().slice(0, 80) || null : null;
+  };
+  return {
+    blackName: prop('PB'),
+    whiteName: prop('PW'),
+    blackRank: prop('BR'),
+    whiteRank: prop('WR'),
+  };
+}
+
 function gameRow(row, includeBody) {
   const base = {
     id: row.id,
@@ -327,33 +343,85 @@ function gameRow(row, includeBody) {
     isPublic: !!row.is_public,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    status: row.status,
+    source: row.source,
+    blackName: row.black_name,
+    whiteName: row.white_name,
+    blackRank: row.black_rank,
+    whiteRank: row.white_rank,
   };
+  if (row.status === 'pending' || row.status === 'analyzing') {
+    base.progress = {
+      percent: Math.round((row.analysis_progress ?? 0) * 100),
+      phase: row.analysis_phase,
+    };
+    base.engineOnline = queueStatus().engineOnline;
+  }
+  if (row.status === 'failed') {
+    base.error = row.analysis_error;
+  }
   if (includeBody) {
     base.sgf = row.sgf;
-    base.analysis = row.analysis ? JSON.parse(row.analysis) : null;
+    base.analysis =
+      row.status === 'ready' && row.analysis ? JSON.parse(row.analysis) : null;
   }
   return base;
 }
 
-// Save a new game (public by default).
+const GAME_SOURCES = new Set(['upload', 'ogs', 'kgs', 'fox', 'curated']);
+
+// Save a new game (public by default). Without a client-computed analysis the
+// game enters the review queue and only reaches the public library when the
+// engine review completes.
 app.post('/api/games', requireAuth, (req, res) => {
   try {
     const title = String(req.body?.title || 'Untitled game').slice(0, 200);
     const sgf = String(req.body?.sgf || '');
     if (!sgf) return res.status(400).json({ error: 'sgf is required' });
+    if (sgf.length > 1_000_000) return res.status(400).json({ error: 'SGF too large' });
     const isPublic = req.body?.isPublic === false ? 0 : 1;
     const analysis = req.body?.analysis ? JSON.stringify(req.body.analysis) : null;
+    const status = analysis ? 'ready' : 'pending';
+    let source = String(req.body?.source || 'upload');
+    if (!GAME_SOURCES.has(source)) source = 'upload';
+    if (analysis) source = 'client';
+    if (source === 'curated' && req.user.role !== 'admin') source = 'upload';
+    const meta = sgfMeta(sgf);
     const now = Date.now();
     const info = db
       .prepare(
-        'INSERT INTO games (owner_id, title, sgf, analysis, is_public, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        `INSERT INTO games (owner_id, title, sgf, analysis, is_public, created_at, updated_at,
+         status, source, analysis_phase, black_name, white_name, black_rank, white_rank)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(req.user.id, title, sgf, analysis, isPublic, now, now);
-    res.json({ id: Number(info.lastInsertRowid) });
+      .run(
+        req.user.id, title, sgf, analysis, isPublic, now, now,
+        status, source, analysis ? null : 'queued',
+        meta.blackName, meta.whiteName, meta.blackRank, meta.whiteRank,
+      );
+    const id = Number(info.lastInsertRowid);
+    if (!analysis) enqueueGame(id);
+    res.json({ id, status });
   } catch (err) {
     console.error('save game error:', err.message);
     res.status(500).json({ error: 'Failed to save game' });
   }
+});
+
+// Re-queue a game for analysis (owner only): retry a failure or re-analyze.
+app.post('/api/games/:id/analyze', requireAuth, (req, res) => {
+  const row = db.prepare('SELECT * FROM games WHERE id = ?').get(Number(req.params.id));
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (row.owner_id !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Not your game' });
+  }
+  if (row.status === 'analyzing') return res.status(409).json({ error: 'Already analyzing' });
+  db.prepare(
+    `UPDATE games SET status = 'pending', attempts = 0, next_attempt_at = 0,
+     analysis_progress = 0, analysis_phase = 'queued', analysis_error = NULL WHERE id = ?`,
+  ).run(row.id);
+  enqueueGame(row.id);
+  res.json({ ok: true, status: 'pending' });
 });
 
 // List the current user's games.
@@ -364,11 +432,24 @@ app.get('/api/games', requireAuth, (req, res) => {
   res.json({ games: rows.map((r) => gameRow(r, false)) });
 });
 
-// List public games.
-app.get('/api/games/public', (_req, res) => {
+// List public games — only ones whose engine review is complete.
+app.get('/api/games/public', (req, res) => {
+  const filters = ["is_public = 1", "status = 'ready'"];
+  const params = [];
+  const source = String(req.query.source || '');
+  if (GAME_SOURCES.has(source) || source === 'client') {
+    filters.push('source = ?');
+    params.push(source);
+  }
+  const q = String(req.query.q || '').trim().slice(0, 80);
+  if (q) {
+    filters.push('(title LIKE ? OR black_name LIKE ? OR white_name LIKE ?)');
+    const like = `%${q}%`;
+    params.push(like, like, like);
+  }
   const rows = db
-    .prepare('SELECT * FROM games WHERE is_public = 1 ORDER BY updated_at DESC LIMIT 100')
-    .all();
+    .prepare(`SELECT * FROM games WHERE ${filters.join(' AND ')} ORDER BY updated_at DESC LIMIT 100`)
+    .all(...params);
   res.json({ games: rows.map((r) => gameRow(r, false)) });
 });
 
@@ -422,6 +503,7 @@ if (process.env.NODE_ENV === 'production') {
 
 const server = app.listen(PORT, () => {
   console.log(`Komi server listening on port ${PORT}`);
+  initReviewQueue();
 });
 
 // LLM and whole-game analysis requests can stay open for minutes. Node's default
