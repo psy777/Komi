@@ -1,8 +1,13 @@
 import type { KataGoAnalysis, KataGoMoveInfo, KataGoProxyResponse, StoneColor } from './types';
 
-const PROXY_ENDPOINT = "https://katago-proxy.vercel.app/api/katago";
+// Local self-hosted KataGo analysis engine (served by server.js, proxied by
+// Vite at /api). Override with VITE_KATAGO_ENDPOINT if hosting elsewhere.
+const PROXY_ENDPOINT =
+  (import.meta as any).env?.VITE_KATAGO_ENDPOINT || "/api/katago";
+const GAME_ENDPOINT =
+  (import.meta as any).env?.VITE_KATAGO_GAME_ENDPOINT || "/api/katago/game";
 const MAX_RETRIES = 3;
-const TIMEOUT_MS = 20000;
+const TIMEOUT_MS = 60000; // local engine searches can take longer than the old proxy
 
 /**
  * Raw fetch from KataGo proxy. Returns the proxy response shape as-is.
@@ -175,6 +180,77 @@ export const batchAnalyze = async (
     }
 
     return results;
+};
+
+function mapNativeResult(raw: any, currentPlayer: StoneColor): KataGoAnalysis {
+  return {
+    moveInfos: (raw.moveInfos || []).map((m: any) => ({
+      move: m.move,
+      visits: m.visits,
+      winrate: m.winrate,
+      scoreLead: m.scoreLead,
+      prior: m.prior,
+      pv: m.pv || [m.move],
+    })),
+    rootInfo: {
+      winrate: raw.rootInfo?.winrate ?? 0.5,
+      scoreLead: raw.rootInfo?.scoreLead ?? 0,
+      visits: raw.rootInfo?.visits ?? 0,
+    },
+    ownership: raw.ownership ?? null,
+    turnNumber: raw.turnNumber ?? 0,
+    currentPlayer,
+  };
+}
+
+/**
+ * Analyze every position of a game in a SINGLE shared-tree query.
+ *
+ * Far faster than analyzing positions one-by-one: KataGo reuses its search
+ * tree across turns. Returns one KataGoAnalysis per turn (index t = board
+ * after t moves), with nulls only on total failure.
+ *
+ * @param movePairs - [["B","Q16"],["W","D4"],...]
+ * @param komi - game komi
+ * @param onProgress - (completed, total) callback
+ */
+export const analyzeGamePositions = async (
+  movePairs: Array<[string, string]>,
+  komi: number = 6.5,
+  onProgress?: (completed: number, total: number) => void,
+): Promise<(KataGoAnalysis | null)[]> => {
+  const total = movePairs.length + 1;
+  onProgress?.(0, total);
+
+  try {
+    const res = await fetch(GAME_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moves: movePairs, komi, includeOwnership: true }),
+    });
+    if (!res.ok) throw new Error(`Game analysis failed: ${res.status}`);
+
+    const { results } = await res.json();
+    const out: (KataGoAnalysis | null)[] = new Array(total).fill(null);
+
+    for (const raw of results || []) {
+      const t = raw.turnNumber ?? 0;
+      if (t < 0 || t >= total) continue;
+      // Side to move at turn t = the player of move t+1 (opposite of last when t == len).
+      const currentPlayer: StoneColor = (
+        t < movePairs.length
+          ? movePairs[t][0]
+          : movePairs[movePairs.length - 1]?.[0] === 'B' ? 'W' : 'B'
+      ) as StoneColor;
+      out[t] = mapNativeResult(raw, currentPlayer);
+    }
+
+    onProgress?.(total, total);
+    return out;
+  } catch (error) {
+    console.error('analyzeGamePositions failed:', error);
+    return new Array(total).fill(null);
+  }
 };
 
 /**

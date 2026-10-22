@@ -1,5 +1,5 @@
 import { parseSGF } from './sgfParser';
-import { batchAnalyze, buildPVLine } from './katagoService';
+import { batchAnalyze } from './katagoService';
 import {
   sgfHash,
   loadGameAnalysis,
@@ -8,8 +8,7 @@ import {
   cacheAnalysis,
 } from './analysisCache';
 import {
-  classifyMove,
-  normalizeAndClassify,
+  computeMoveQuality,
   detectMistakeType,
   detectGamePhase,
   detectThemes,
@@ -233,14 +232,20 @@ export async function analyzeGame(
       continue;
     }
 
-    const { classification, scoreDelta, winrateDelta } = classifyMove(
-      evalBefore,
-      evalAfter,
-    );
+    const actualMove = moves[i].gtp;
+    const { classification, scoreDelta, winrateDelta, pointsLost, winrateLost } =
+      computeMoveQuality(evalBefore, evalAfter, actualMove, moves[i].color);
 
     const engineTopMove = evalBefore.moveInfos[0]?.move ?? '';
     const enginePV = evalBefore.moveInfos[0]?.pv ?? [];
-    const actualMove = moves[i].gtp;
+
+    // The opponent's best reply after the played move IS the punishment line.
+    // For mistakes/blunders this is the refutation; the engine returns it
+    // directly now (no more iterative PV stitching).
+    const refutationPV =
+      classification === 'mistake' || classification === 'blunder'
+        ? evalAfter.moveInfos[0]?.pv
+        : undefined;
 
     // Approximate board occupancy from move count
     const boardOccupancy = (i + 1) / 361;
@@ -257,13 +262,16 @@ export async function analyzeGame(
       moveNumber: i + 1,
       color: moves[i].color === 'B' ? StoneColor.BLACK : StoneColor.WHITE,
       classification,
-      // mistakeType is computed after normalization (see step 5b below)
+      // mistakeType is computed in step 5b below
       scoreDelta,
       winrateDelta,
+      pointsLost,
+      winrateLost,
       gamePhase,
       themes,
       engineTopMove,
       enginePV,
+      refutationPV,
       isKeyMoment: false,
       pattern: patterns[i] ?? undefined,
     });
@@ -272,27 +280,18 @@ export async function analyzeGame(
   }
 
   // ------------------------------------------------------------------
-  // 5. Normalize score deltas & re-classify
+  // 5. Detect mistake types
   // ------------------------------------------------------------------
-  // The proxy score has a constant per-move bias (~+12 pts in the raw
-  // delta). Subtracting the median removes this bias so classifications
-  // reflect actual move quality.
+  // Real engine data needs no bias normalization — scoreDelta is already
+  // the (negated) points lost vs. the best move. Sub-classify mistakes here.
 
-  const normalized = normalizeAndClassify(annotations);
-
-  // ------------------------------------------------------------------
-  // 5b. Detect mistake types (requires normalized classifications)
-  // ------------------------------------------------------------------
-  // detectMistakeType must run AFTER normalization so it sees the
-  // corrected classification (not the bias-inflated provisional one).
-
-  for (let j = 0; j < normalized.length; j++) {
-    const ann = normalized[j];
+  for (let j = 0; j < annotations.length; j++) {
+    const ann = annotations[j];
     const moveIdx = ann.moveNumber - 1;
     const evalBefore = analysisResults[moveIdx];
     if (!evalBefore) continue;
 
-    normalized[j] = {
+    annotations[j] = {
       ...ann,
       mistakeType: detectMistakeType(
         moves[moveIdx].gtp,
@@ -308,69 +307,17 @@ export async function analyzeGame(
   // 6. Key moments
   // ------------------------------------------------------------------
 
-  const annotated = identifyKeyMoments(normalized, analysisResults);
+  const annotated = identifyKeyMoments(annotations, analysisResults);
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
 
-  // ------------------------------------------------------------------
-  // 6a. Extend engine PV lines and build refutation lines for key moments
-  // ------------------------------------------------------------------
-  // The proxy only returns 1-move PVs. For key moments we iteratively
-  // query the proxy to build longer engine lines (~6 moves) and, for
-  // mistakes/blunders, a refutation line showing opponent's punishment.
-
-  const PV_DEPTH = 6;
-  const MAX_PV_EXTENSIONS = 12; // cap total extra queries
+  // Engine PVs (up to analysisPVLen moves) and refutation lines are already
+  // populated directly from the analysis engine during annotation — no
+  // iterative PV stitching needed.
 
   const estimatedLevel = playerLevel ?? estimatePlayerLevel(annotated);
 
   // Build a flat GTP move list for deep analysis to reuse
   const flatMoveList = buildMoveList(moves, totalMoves);
-
-  let pvExtensionsUsed = 0;
-  for (const ann of annotated) {
-    if (!ann.isKeyMoment || pvExtensionsUsed >= MAX_PV_EXTENSIONS) continue;
-
-    const movesBefore = flatMoveList.slice(0, (ann.moveNumber - 1) * 2);
-    const moverColor = moves[ann.moveNumber - 1].color as StoneColor;
-    const opponentColor: StoneColor =
-      moverColor === ('B' as StoneColor) ? ('W' as StoneColor) : ('B' as StoneColor);
-
-    // Extend engine PV: start from the engine's recommended move
-    if (ann.enginePV.length <= 1 && ann.engineTopMove) {
-      onProgress?.({
-        phase: 'semantic',
-        current: totalMoves,
-        total: totalMoves,
-        message: `Building engine line for move ${ann.moveNumber}...`,
-      });
-
-      const engineStart = [...movesBefore, moverColor as string, ann.engineTopMove];
-      const continuation = await buildPVLine(engineStart, opponentColor, PV_DEPTH - 1, komi);
-      ann.enginePV = [ann.engineTopMove, ...continuation];
-      pvExtensionsUsed += PV_DEPTH - 1;
-    }
-
-    // Build refutation PV for mistakes/blunders: what happens after the bad move
-    if (
-      (ann.classification === 'mistake' || ann.classification === 'blunder') &&
-      pvExtensionsUsed < MAX_PV_EXTENSIONS
-    ) {
-      onProgress?.({
-        phase: 'semantic',
-        current: totalMoves,
-        total: totalMoves,
-        message: `Building refutation line for move ${ann.moveNumber}...`,
-      });
-
-      const actualMove = moves[ann.moveNumber - 1].gtp;
-      const afterMistake = [...movesBefore, moverColor as string, actualMove];
-      const refutation = await buildPVLine(afterMistake, opponentColor, PV_DEPTH, komi);
-      if (refutation.length > 0) {
-        ann.refutationPV = refutation;
-      }
-      pvExtensionsUsed += PV_DEPTH;
-    }
-  }
 
   // Preliminary result for ambiguity detection (positions needed)
   const positions = analysisResults.filter(

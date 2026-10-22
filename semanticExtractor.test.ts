@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  classifyMove,
+  computeMoveQuality,
+  classifyByPointsLost,
   detectMistakeType,
   detectGamePhase,
   detectThemes,
@@ -56,73 +57,87 @@ function makeAnnotation(overrides: Partial<SemanticAnnotation> = {}): SemanticAn
 }
 
 // ---------------------------------------------------------------------------
-// classifyMove
+// computeMoveQuality — points-lost classification (real engine data)
 // ---------------------------------------------------------------------------
 
-describe('classifyMove', () => {
-  // New formula: scoreDelta = evalBefore.scoreLead - evalAfter.scoreLead
-  // Positive delta = score dropped (good for mover). Negative = score rose (bad).
+describe('computeMoveQuality', () => {
+  // pointsLost = scoreLead(best) - scoreLead(played), from the mover's POV.
+  // Default moveInfos: best = D4 (scoreLead 0), 2nd = Q16 (scoreLead -0.2).
+  // Scores are Black-perspective (reportAnalysisWinratesAs=BLACK).
 
-  it('computes positive delta when score drops (good move)', () => {
-    // before: -10, after: -13 → delta = -10 - (-13) = 3.0 → brilliant
-    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: -13, winrate: 0.47 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(3.0, 1);
-    expect(result.classification).toBe('brilliant');
+  it('classifies the engine best move as good (≈0 points lost)', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: 0 });
+    const r = computeMoveQuality(before, after, 'D4', 'B');
+    expect(r.pointsLost).toBeCloseTo(0, 1);
+    expect(r.scoreDelta).toBeCloseTo(0, 1);
+    expect(r.classification).toBe('good');
   });
 
-  it('computes negative delta when score rises (bad move)', () => {
-    // before: -10, after: -2 → delta = -10 - (-2) = -8.0 → blunder
-    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: -2, winrate: 0.55 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(-8.0, 1);
-    expect(result.classification).toBe('blunder');
+  it('falls back to the resulting position when the move is not a candidate', () => {
+    // Black plays an off-list move; resulting Black-score is -3 → lost 3 pts → mistake
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -3 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.pointsLost).toBeCloseTo(3, 1);
+    expect(r.scoreDelta).toBeCloseTo(-3, 1);
+    expect(r.classification).toBe('mistake');
   });
 
-  it('classifies near-zero delta as neutral', () => {
-    // before: -10, after: -10.3 → delta = 0.3 → neutral
-    const before = makeEval({ scoreLead: -10, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: -10.3, winrate: 0.49 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(0.3, 1);
-    expect(result.classification).toBe('neutral');
+  it('computes points lost from White\'s perspective (lower Black-score is better)', () => {
+    // White's best leaves Black at 0; played move leaves Black at +4 → White lost 4 → mistake
+    const before = makeEval({ currentPlayer: StoneColor.WHITE });
+    const after  = makeEval({ scoreLead: 4 });
+    const r = computeMoveQuality(before, after, 'T1', 'W');
+    expect(r.pointsLost).toBeCloseTo(4, 1);
+    expect(r.classification).toBe('mistake');
   });
 
-  it('classifies a mistake (moderate loss)', () => {
-    // before: -10, after: -7 → delta = -10 - (-7) = -3.0 → mistake
-    const before = makeEval({ scoreLead: -10 });
-    const after  = makeEval({ scoreLead: -7 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(-3.0, 1);
-    expect(result.classification).toBe('mistake');
+  it('classifies a small loss as inaccuracy', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -1.5 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.classification).toBe('inaccuracy');
   });
 
-  it('classifies an inaccuracy (small loss)', () => {
-    // before: -10, after: -8.5 → delta = -10 - (-8.5) = -1.5 → inaccuracy
-    const before = makeEval({ scoreLead: -10 });
-    const after  = makeEval({ scoreLead: -8.5 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(-1.5, 1);
-    expect(result.classification).toBe('inaccuracy');
+  it('classifies a large loss as a blunder', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -8 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.classification).toBe('blunder');
   });
 
-  it('classifies a good move', () => {
-    // before: -10, after: -11 → delta = -10 - (-11) = 1.0 → good
-    const before = makeEval({ scoreLead: -10 });
-    const after  = makeEval({ scoreLead: -11 });
-    const result = classifyMove(before, after);
-    expect(result.scoreDelta).toBeCloseTo(1.0, 1);
-    expect(result.classification).toBe('good');
+  it('classifies the only good move in a hard position as brilliant', () => {
+    // Best move is 4 pts better than the 2nd best, and the player found it.
+    const before = makeEval({
+      moveInfos: [
+        { move: 'D4', visits: 80, winrate: 0.6, scoreLead: 5.0, prior: 0.4, pv: ['D4'] },
+        { move: 'Q16', visits: 20, winrate: 0.45, scoreLead: 1.0, prior: 0.2, pv: ['Q16'] },
+      ],
+    });
+    const after = makeEval({ scoreLead: 5.0 });
+    const r = computeMoveQuality(before, after, 'D4', 'B');
+    expect(r.classification).toBe('brilliant');
   });
 
-  it('computes winrate delta correctly', () => {
-    // winrateDelta = before.winrate - after.winrate
-    const before = makeEval({ scoreLead: 0, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: 0, winrate: 0.4 });
-    const result = classifyMove(before, after);
-    expect(result.winrateDelta).toBeCloseTo(0.1, 2);
+  it('computes winrate lost vs the best move', () => {
+    const before = makeEval({
+      moveInfos: [{ move: 'D4', visits: 80, winrate: 0.6, scoreLead: 0, prior: 0.3, pv: ['D4'] }],
+    });
+    const after = makeEval({ winrate: 0.5 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.winrateLost).toBeCloseTo(0.1, 2);
+  });
+});
+
+describe('classifyByPointsLost', () => {
+  it('maps points-lost tiers correctly', () => {
+    expect(classifyByPointsLost(0.2, 0)).toBe('good');
+    expect(classifyByPointsLost(0.2, 4)).toBe('brilliant'); // hard position
+    expect(classifyByPointsLost(0.8, 0)).toBe('neutral');
+    expect(classifyByPointsLost(1.5, 0)).toBe('inaccuracy');
+    expect(classifyByPointsLost(3.0, 0)).toBe('mistake');
+    expect(classifyByPointsLost(9.0, 0)).toBe('blunder');
   });
 });
 

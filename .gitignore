@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 .env.local
+
+# KataGo analysis engine log (written to cwd per analysis.cfg)
+analysis.log
+
+# Self-hosted SQLite database
+komi.db
+komi.db-*

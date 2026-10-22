@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { FaFolderOpen, FaSave, FaChevronLeft, FaChevronRight, FaStepBackward, FaStepForward, FaCodeBranch, FaInfoCircle, FaUserCircle, FaBars, FaChevronUp, FaChevronDown, FaTimes, FaCamera, FaLink } from 'react-icons/fa';
 import GoBoard from './GoBoard';
 import type { MoveAnnotation, PVStone } from './GoBoard';
+import GameLibrary from './GameLibrary';
+import { exportReviewSGF } from './reviewExport';
 import GeminiChat from './GeminiChat';
 import AnalysisProgress from './AnalysisProgress';
 import ScoreGraph from './ScoreGraph';
@@ -14,8 +16,8 @@ import { StoneColor, BoardState, GameTree, GameNode, ChatMessage, AnalysisProgre
 import { createEmptyGrid, playMove } from './goLogic';
 import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
-import { batchAnalyze } from './katagoService';
-import { classifyMove, normalizeAndClassify, detectMistakeType, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
+import { analyzeGamePositions } from './katagoService';
+import { computeMoveQuality, detectMistakeType, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
@@ -68,6 +70,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
   const [activeThemes, setActiveThemes] = useState<Set<string>>(new Set());
 
   // OGS import state
+  const [showLibrary, setShowLibrary] = useState(false);
   const [showOgsImport, setShowOgsImport] = useState(false);
   const [ogsUrl, setOgsUrl] = useState('');
   const [ogsLoading, setOgsLoading] = useState(false);
@@ -251,6 +254,22 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     setGameTree(prev => ({ ...prev, currentId: ptr }));
   };
 
+  const handleNextKeyMoment = () => {
+    if (!analysisResult) return;
+    const nextMoment = analysisResult.keyMoments.find(m => m.moveNumber > currentDepth);
+    if (nextMoment) {
+      handleJumpToMove(nextMoment.moveNumber);
+    }
+  };
+
+  const handlePrevKeyMoment = () => {
+    if (!analysisResult) return;
+    const prevMoments = analysisResult.keyMoments.filter(m => m.moveNumber < currentDepth);
+    if (prevMoments.length > 0) {
+      handleJumpToMove(prevMoments[prevMoments.length - 1].moveNumber);
+    }
+  };
+
   const handleMoveInputSubmit = (e: React.FormEvent) => {
       e.preventDefault();
       handleJumpToMove(parseInt(moveInput, 10));
@@ -281,7 +300,17 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const content = event.target?.result as string;
-      if (content) setGameTree(parseSGF(content));
+      if (content) {
+        try {
+          setGameTree(parseSGF(content));
+        } catch (err) {
+          console.error("SGF parse error:", err);
+          alert(err instanceof Error ? err.message : "Failed to parse SGF file.");
+        }
+      }
+    };
+    reader.onerror = () => {
+      alert("Failed to read the file. Please try again.");
     };
     reader.readAsText(file);
   };
@@ -308,16 +337,21 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     }
   };
 
-  const handleSaveSGF = () => {
-      const sgf = generateSGF(gameTree);
+  const downloadSgf = (sgf: string, filename: string) => {
       const blob = new Blob([sgf], { type: 'application/x-go-sgf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'game.sgf';
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
   };
+
+  const handleSaveSGF = () => downloadSgf(generateSGF(gameTree), 'game.sgf');
+
+  // Export the full review (comments, glyphs, key moments, engine + refutation
+  // lines) as a replayable annotated SGF.
+  const handleExportReview = () => downloadSgf(exportReviewSGF(gameTree, analysisResult), 'komi-review.sgf');
 
   // --- Analysis Handler ---
   const handleAnalyzeGame = useCallback(async () => {
@@ -342,26 +376,16 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
     const toGtp = (x: number, y: number) => `${GTP_COLS[x]}${19 - y}`;
 
-    // Build cumulative move lists for each position (including empty board)
-    const positions: Array<{ moves: string[]; komi: number; currentPlayer: StoneColor }> = [];
-    const gtpMoves: string[] = [];
+    // Build [color, gtp] move pairs for a single shared-tree whole-game query.
+    const movePairs: Array<[string, string]> = moveNodes.map((node) => [
+      node.move!.color === StoneColor.BLACK ? 'B' : 'W',
+      toGtp(node.move!.x, node.move!.y),
+    ]);
 
-    // Position 0: empty board
-    positions.push({ moves: [], komi, currentPlayer: StoneColor.BLACK });
+    // Phase 1: Engine analysis (one query analyzes every turn)
+    setAnalysisProgress({ phase: 'engine', current: 0, total: movePairs.length + 1 });
 
-    for (const node of moveNodes) {
-      const m = node.move!;
-      // Proxy expects flat ["B", "D4", "W", "Q16"] format, not ["B D4", "W Q16"]
-      gtpMoves.push(m.color === StoneColor.BLACK ? 'B' : 'W', toGtp(m.x, m.y));
-      const nextPlayer = m.color === StoneColor.BLACK ? StoneColor.WHITE : StoneColor.BLACK;
-      positions.push({ moves: [...gtpMoves], komi, currentPlayer: nextPlayer });
-    }
-
-    // Phase 1: Engine analysis
-    const totalPositions = positions.length;
-    setAnalysisProgress({ phase: 'engine', current: 0, total: totalPositions });
-
-    const analysisResults = await batchAnalyze(positions, 3, (completed, total) => {
+    const analysisResults = await analyzeGamePositions(movePairs, komi, (completed, total) => {
       setAnalysisProgress({ phase: 'engine', current: completed, total });
     });
 
@@ -384,9 +408,11 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
         continue;
       }
 
-      const { classification, scoreDelta, winrateDelta } = classifyMove(evalBefore, evalAfter);
       const moveNode = moveNodes[i];
       const moveGtp = toGtp(moveNode.move!.x, moveNode.move!.y);
+      const moverColor = moveNode.move!.color === StoneColor.BLACK ? 'B' : 'W';
+      const { classification, scoreDelta, winrateDelta, pointsLost, winrateLost } =
+        computeMoveQuality(evalBefore, evalAfter, moveGtp, moverColor);
 
       // Board occupancy estimate
       const stoneCount = i + 1;
@@ -397,6 +423,11 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       const themes = detectThemes(evalBefore, evalAfter, actualMoveInfo);
       const engineTopMove = evalBefore.moveInfos[0]?.move ?? moveGtp;
       const enginePV = evalBefore.moveInfos[0]?.pv ?? [engineTopMove];
+      // Opponent's best reply after the played move = the punishment line.
+      const refutationPV =
+        classification === 'mistake' || classification === 'blunder'
+          ? evalAfter.moveInfos[0]?.pv
+          : undefined;
 
       classificationCounts[classification] = (classificationCounts[classification] ?? 0) + 1;
       phaseBreakdown[gamePhase] = (phaseBreakdown[gamePhase] ?? 0) + 1;
@@ -408,28 +439,28 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
         classification,
         scoreDelta,
         winrateDelta,
+        pointsLost,
+        winrateLost,
         gamePhase,
         themes,
         engineTopMove,
         enginePV,
+        refutationPV,
         isKeyMoment: false,
       });
 
       setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
     }
 
-    // Normalize score deltas to remove proxy per-move drift, then re-classify
-    const normalized = normalizeAndClassify(annotations);
-
-    // Detect mistake types after normalization (needs corrected classifications)
-    for (let j = 0; j < normalized.length; j++) {
-      const ann = normalized[j];
+    // Detect mistake types (real engine data needs no bias normalization)
+    for (let j = 0; j < annotations.length; j++) {
+      const ann = annotations[j];
       const moveIdx = ann.moveNumber - 1;
       const evalBefore = analysisResults[moveIdx];
       if (!evalBefore) continue;
 
       const actualMove = toGtp(moveNodes[moveIdx].move!.x, moveNodes[moveIdx].move!.y);
-      normalized[j] = {
+      annotations[j] = {
         ...ann,
         mistakeType: detectMistakeType(
           actualMove,
@@ -441,12 +472,12 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       };
     }
 
-    // Identify key moments
-    const annotationsWithKeys = identifyKeyMoments(normalized);
+    // Identify key moments (pass positions for winrate-trajectory detection)
+    const annotationsWithKeys = identifyKeyMoments(annotations, analysisResults);
     const keyMoments = annotationsWithKeys.filter(a => a.isKeyMoment);
     const playerLevel = estimatePlayerLevel(annotationsWithKeys);
 
-    // Recount classifications after normalization
+    // Recount classifications
     for (const cls of Object.keys(classificationCounts)) {
       classificationCounts[cls] = 0;
     }
@@ -703,6 +734,19 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
         </div>
       )}
 
+      {/* Game Library (auth + saved games) */}
+      {showLibrary && (
+        <GameLibrary
+          onClose={() => setShowLibrary(false)}
+          getCurrentSgf={() => generateSGF(gameTree)}
+          getCurrentAnalysis={() => analysisResult}
+          onLoad={(sgf, analysis) => {
+            setGameTree(parseSGF(sgf));
+            setAnalysisResult((analysis as FullGameAnalysis) ?? null);
+          }}
+        />
+      )}
+
       {/* OGS Import Modal */}
       {showOgsImport && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => !ogsLoading && setShowOgsImport(false)}>
@@ -763,6 +807,16 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                 <FaSave className="text-blue-400" />
                 <span className="hidden sm:inline">Save</span>
             </button>
+            <button onClick={() => setShowLibrary(true)} className="flex items-center gap-1.5 hover:bg-slate-800 text-slate-400 hover:text-white px-3 py-1.5 rounded-lg transition-all text-xs font-semibold">
+                <FaFolderOpen className="text-amber-400" />
+                <span className="hidden sm:inline">Library</span>
+            </button>
+            {analysisResult && (
+              <button onClick={handleExportReview} title="Download the full review as an annotated SGF" className="flex items-center gap-1.5 hover:bg-slate-800 text-slate-400 hover:text-white px-3 py-1.5 rounded-lg transition-all text-xs font-semibold">
+                  <FaSave className="text-emerald-400" />
+                  <span className="hidden sm:inline">Export Review</span>
+              </button>
+            )}
             <button
               onClick={handleAnalyzeGame}
               disabled={isAnalyzing}
@@ -810,7 +864,8 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
             {/* Analysis Panel */}
             {(analysisProgress || analysisResult) && (
               <div className="p-2 sm:p-3 space-y-2 border-b border-slate-800 overflow-y-auto max-h-[40vh] md:max-h-[50%] shrink-0">
-                {analysisProgress && (
+                {/* AnalysisProgress hidden per KOM-39 — code preserved */}
+                {false && analysisProgress && (
                   <AnalysisProgress progress={analysisProgress} result={analysisResult} />
                 )}
                 {analysisResult && (
@@ -844,12 +899,17 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                       onMoveSelect={handleJumpToMove}
                       highlightedMoves={highlightedMoves}
                     />
+                    {/* ConceptTagFilter hidden per KOM-39 — code preserved */}
+                    {false && (
                     <ConceptTagFilter
                       themes={analysisResult.summary.themes}
                       activeThemes={activeThemes}
                       onToggleTheme={handleToggleTheme}
                       onClearAll={handleClearThemes}
                     />
+                    )}
+                    {/* KeyMomentNav hidden per KOM-39 — code preserved */}
+                    {false && (
                     <KeyMomentNav
                       keyMoments={analysisResult.keyMoments}
                       currentMove={currentDepth}
@@ -858,6 +918,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                       onShowPV={handleShowPV}
                       onShowRefutation={handleShowRefutation}
                     />
+                    )}
                     {selectedAnnotation && (
                       <TutoringPanel
                         annotation={selectedAnnotation}
@@ -874,12 +935,13 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
               </div>
             )}
 
-            {/* Chat History Section (Expands UPWARD on mobile) */}
+            {/* Chat History Section hidden per KOM-39 — code preserved */}
+            {false && (
             <div className={`flex-1 overflow-hidden bg-slate-950/20 flex flex-col transition-all duration-300 ease-in-out ${chatExpanded ? 'h-[180px] md:h-full opacity-100' : 'h-0 opacity-0 md:opacity-100 md:h-full'}`}>
-                 <GeminiChat 
+                 <GeminiChat
                     currentNodeId={gameTree.currentId}
                     gameTree={gameTree}
-                    boardState={boardState} 
+                    boardState={boardState}
                     currentPlayer={currentPlayer}
                     komi={komi}
                     messages={gameTree.nodes[gameTree.currentId].chatHistory || []}
@@ -889,23 +951,27 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                     hideInput={true}
                  />
             </div>
+            )}
 
             {/* Bottom Controls Hub */}
             <div className="bg-slate-900 flex flex-col border-t border-slate-800">
                 
-                {/* Mobile Expand Button (Above Chatbar) */}
-                <div 
+                {/* Mobile Expand Button hidden per KOM-39 — code preserved */}
+                {false && (
+                <div
                     className="md:hidden flex items-center justify-center h-6 bg-slate-800/50 hover:bg-slate-800 cursor-pointer border-b border-slate-700/30 transition-colors"
                     onClick={() => setChatExpanded(!chatExpanded)}
                 >
                     {chatExpanded ? <FaChevronDown className="text-slate-600 text-[10px]" /> : <FaChevronUp className="text-slate-600 text-[10px]" />}
                 </div>
+                )}
 
-                {/* Gemini Chat Input Area (Directly above nav controls) */}
-                <GeminiChat 
+                {/* Gemini Chat Input hidden per KOM-39 — code preserved */}
+                {false && (
+                <GeminiChat
                     currentNodeId={gameTree.currentId}
                     gameTree={gameTree}
-                    boardState={boardState} 
+                    boardState={boardState}
                     currentPlayer={currentPlayer}
                     komi={komi}
                     messages={gameTree.nodes[gameTree.currentId].chatHistory || []}
@@ -914,6 +980,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                     onInteractionComplete={handleInteractionComplete}
                     showOnlyInput={true}
                  />
+                )}
 
                 {/* Navigation Controls (Absolute Bottom of UI) */}
                 <div className="p-2 sm:p-3 bg-slate-900 flex flex-col gap-2 shrink-0">
@@ -937,6 +1004,29 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                         <button onClick={handleLast} className="p-2 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-white transition-all" title="End"><FaStepForward size={14}/></button>
                     </div>
 
+                    {/* Key Moment Navigation */}
+                    {analysisResult && analysisResult.keyMoments.length > 0 && (
+                        <div className="flex items-center justify-center gap-2 py-1 border-t border-slate-800/40">
+                            <button
+                                onClick={handlePrevKeyMoment}
+                                disabled={!analysisResult.keyMoments.some(m => m.moveNumber < currentDepth)}
+                                className="px-3 py-1 rounded-lg text-[10px] font-semibold transition-all border bg-amber-700/30 border-amber-600/40 text-amber-400 hover:bg-amber-600/50 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Previous Key Moment"
+                            >
+                                <FaChevronLeft className="inline mr-1" size={8}/>Prev Key
+                            </button>
+                            <span className="text-[9px] text-amber-600 font-black uppercase tracking-[0.1em]">Key Moments</span>
+                            <button
+                                onClick={handleNextKeyMoment}
+                                disabled={!analysisResult.keyMoments.some(m => m.moveNumber > currentDepth)}
+                                className="px-3 py-1 rounded-lg text-[10px] font-semibold transition-all border bg-amber-700/30 border-amber-600/40 text-amber-400 hover:bg-amber-600/50 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Next Key Moment"
+                            >
+                                Next Key<FaChevronRight className="inline ml-1" size={8}/>
+                            </button>
+                        </div>
+                    )}
+
                     {/* Variations */}
                     {nextNodes.length > 1 && (
                         <div className="flex items-center justify-center gap-1.5 overflow-x-auto py-1 border-t border-slate-800/40">
@@ -959,7 +1049,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                 {/* Micro Footer */}
                 <div className="px-4 py-1.5 border-t border-slate-800 text-[9px] text-slate-600 flex items-center justify-between bg-slate-950/40 shrink-0">
                     <span className="flex items-center gap-1 opacity-50"><FaInfoCircle /> v1.7.5</span>
-                    <span className="opacity-40 font-medium">Stone Ghost Analysis Active</span>
+                    {/* Stone Ghost label hidden per KOM-39 */}
                 </div>
             </div>
         </div>

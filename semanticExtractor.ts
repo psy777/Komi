@@ -14,13 +14,30 @@ import type {
 // Configurable thresholds (score-lead points)
 // ---------------------------------------------------------------------------
 
+/**
+ * Mistake-size thresholds expressed as signed scoreDelta (= -pointsLost).
+ * Retained for detectMistakeType, which keys off the "negative = worse"
+ * convention (e.g. scoreDelta < -5.0 → blunder territory).
+ */
 export const CLASSIFICATION_THRESHOLDS = {
-  brilliant:   2.0,   // scoreDelta > +2.0
-  good:        0.5,   // scoreDelta > +0.5
-  neutral:    -0.5,   // scoreDelta > -0.5
-  inaccuracy: -2.0,   // scoreDelta > -2.0
-  mistake:    -5.0,   // scoreDelta > -5.0
-  // anything below -5.0 is a blunder
+  brilliant:   2.0,
+  good:        0.5,
+  neutral:    -0.5,
+  inaccuracy: -2.0,
+  mistake:    -5.0,
+} as const;
+
+/**
+ * Points-lost tiers — the primary classification axis with real engine data.
+ * pointsLost = scoreLead(best move) - scoreLead(played move), mover's POV.
+ */
+export const POINTS_LOST_TIERS = {
+  great:      0.5,   // <= 0.5 pts lost → great (or brilliant if hard to find)
+  good:       1.0,   // <= 1.0 → good
+  inaccuracy: 2.0,   // <= 2.0 → inaccuracy
+  mistake:    5.0,   // <= 5.0 → mistake; above → blunder
+  /** If the 2nd-best move is this many points worse, finding the best was hard. */
+  brilliantHardnessGap: 3.0,
 } as const;
 
 export const PHASE_THRESHOLDS = {
@@ -48,79 +65,79 @@ export const KEY_MOMENT_THRESHOLDS = {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute raw score/winrate deltas for a move.
+ * Compute move quality as points lost vs. the engine's best move.
  *
- * The KataGo proxy's score does not alternate perspective between
- * players — empirically verified: passing does not change the score
- * sign. The score has a constant per-move bias (~-12 pts per stone
- * placed). We compute the simple difference `evalBefore - evalAfter`
- * which yields `quality + constant_bias`. The constant bias is then
- * removed by `normalizeAndClassify()`.
+ * With real KataGo data (Black-perspective scores), the quality of a move
+ * is read directly from a single position: the engine evaluates the best
+ * move and the played move at evalBefore. We compare them from the mover's
+ * perspective — no cross-position subtraction, no per-stone bias, no median
+ * normalization (all of which the old proxy required).
  *
- * Returns a provisional classification based on raw deltas (biased by
- * the per-move constant), but callers should prefer the normalized
- * result from `normalizeAndClassify()`.
+ *   pointsLost  = scoreLead(best) - scoreLead(played)   [mover's POV, >= 0]
+ *   scoreDelta  = -pointsLost  (kept negative-is-bad for downstream consumers)
+ *
+ * @param evalBefore - engine eval of the position before the move (mover to play)
+ * @param evalAfter  - engine eval after the move (used as fallback for the
+ *                     played move's value when it isn't among the candidates)
+ * @param actualMove - GTP coordinate of the move played
+ * @param moverColor - 'B' | 'W' (or StoneColor) of the player who moved
  */
-export function classifyMove(
+export function computeMoveQuality(
   evalBefore: KataGoAnalysis,
   evalAfter: KataGoAnalysis,
-): { classification: MoveClassification; scoreDelta: number; winrateDelta: number } {
-  // The proxy's score is on a fixed scale (not alternating per player).
-  // A move that improves the mover's position causes evalAfter to be
-  // lower (more negative) than evalBefore, so the difference
-  // evalBefore - evalAfter is positive for good moves.
-  const scoreDelta  = evalBefore.rootInfo.scoreLead - evalAfter.rootInfo.scoreLead;
-  const winrateDelta = evalBefore.rootInfo.winrate - evalAfter.rootInfo.winrate;
+  actualMove: string,
+  moverColor: StoneColor | string,
+): {
+  classification: MoveClassification;
+  scoreDelta: number;
+  winrateDelta: number;
+  pointsLost: number;
+  winrateLost: number;
+} {
+  const isBlack = moverColor === 'B' || moverColor === ('B' as StoneColor);
 
-  // Provisional classification — will be overridden by normalizeAndClassify
-  const classification = classifyFromDelta(scoreDelta);
-  return { classification, scoreDelta, winrateDelta };
+  const best = evalBefore.moveInfos[0];
+  const bestScore = best?.scoreLead ?? evalBefore.rootInfo.scoreLead;
+  const bestWin = best?.winrate ?? evalBefore.rootInfo.winrate;
+
+  // The played move's resulting value (Black perspective). Prefer the engine's
+  // own evaluation of it among the candidates; otherwise use the eval of the
+  // resulting position (evalAfter's root).
+  const played = evalBefore.moveInfos.find((m) => m.move === actualMove);
+  const playedScore = played ? played.scoreLead : evalAfter.rootInfo.scoreLead;
+  const playedWin = played ? played.winrate : evalAfter.rootInfo.winrate;
+
+  // Loss from the mover's perspective: Black wants higher Black-score, White
+  // wants lower. Clamp tiny negatives (search noise) to zero.
+  const pointsLost = Math.max(0, isBlack ? bestScore - playedScore : playedScore - bestScore);
+  const winrateLost = Math.max(0, isBlack ? bestWin - playedWin : playedWin - bestWin);
+
+  // How hard was finding the best move? Gap to the 2nd-best candidate.
+  const second = evalBefore.moveInfos[1];
+  const hardnessGap = second ? Math.abs(bestScore - second.scoreLead) : 0;
+
+  return {
+    classification: classifyByPointsLost(pointsLost, hardnessGap),
+    scoreDelta: -pointsLost,
+    winrateDelta: -winrateLost,
+    pointsLost,
+    winrateLost,
+  };
 }
 
-/** Classify a single (normalized) score delta against thresholds. */
-function classifyFromDelta(delta: number): MoveClassification {
-  const t = CLASSIFICATION_THRESHOLDS;
-  if (delta > t.brilliant)        return 'brilliant';
-  if (delta > t.good)             return 'good';
-  if (delta > t.neutral)          return 'neutral';
-  if (delta > t.inaccuracy)       return 'inaccuracy';
-  if (delta > t.mistake)          return 'mistake';
+/** Map points-lost (and hardness) to a move classification. */
+export function classifyByPointsLost(
+  pointsLost: number,
+  hardnessGap: number,
+): MoveClassification {
+  const t = POINTS_LOST_TIERS;
+  if (pointsLost <= t.great) {
+    return hardnessGap > t.brilliantHardnessGap ? 'brilliant' : 'good';
+  }
+  if (pointsLost <= t.good) return 'neutral';
+  if (pointsLost <= t.inaccuracy) return 'inaccuracy';
+  if (pointsLost <= t.mistake) return 'mistake';
   return 'blunder';
-}
-
-/**
- * Normalize and re-classify annotations for an entire game.
- *
- * The KataGo proxy's score values drift systematically with each move,
- * producing inflated positive scoreDelta values. This function computes
- * the median scoreDelta across the game (representing the "expected"
- * gain of a typical move) and subtracts it before classifying.
- *
- * After normalization:
- * - A move matching the median → scoreDelta ≈ 0 → "neutral"
- * - A move gaining more than typical → positive → "good"/"brilliant"
- * - A move gaining less than typical → negative → "inaccuracy"/"mistake"/"blunder"
- */
-export function normalizeAndClassify(
-  annotations: SemanticAnnotation[],
-): SemanticAnnotation[] {
-  if (annotations.length === 0) return [];
-
-  // Compute median scoreDelta
-  const deltas = annotations.map(a => a.scoreDelta).sort((a, b) => a - b);
-  const mid = Math.floor(deltas.length / 2);
-  const median = deltas.length % 2 === 0
-    ? (deltas[mid - 1] + deltas[mid]) / 2
-    : deltas[mid];
-
-  return annotations.map(ann => {
-    const normalizedDelta = ann.scoreDelta - median;
-    return {
-      ...ann,
-      scoreDelta: normalizedDelta,
-      classification: classifyFromDelta(normalizedDelta),
-    };
-  });
 }
 
 // ---------------------------------------------------------------------------
