@@ -1,15 +1,43 @@
+# Render deployment for komireview.com.
+#
+# One Node web service with a persistent disk for the SQLite database.
+# Constraints that follow from SQLite-on-disk:
+#   - numInstances must stay 1 (the DB is a local file)
+#   - deploys have brief downtime (disks preclude zero-downtime deploys);
+#     the review queue re-queues any game that was mid-analysis on boot
+#
+# KataGo analysis runs remotely: set KATAGO_API_URL/KATAGO_API_KEY to the
+# RunPod serverless endpoint (see ~/Coding/katago-api/docker/runpod.md) or
+# to the home box at https://kata.komireview.com.
+
 services:
   - type: web
-    runtime: node
     name: komi
+    runtime: node
+    plan: starter # disks require a paid instance
+    numInstances: 1
     buildCommand: npm install && npm run build
     startCommand: npm start
+    disk:
+      name: komi-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
-      - key: GEMINI_API_KEY
-        sync: false
+      - key: NODE_VERSION
+        value: "24"
       - key: NODE_ENV
         value: production
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+      - key: KOMI_DB_PATH
+        value: /data/komi.db
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: KATAGO_API_URL
+        sync: false # RunPod endpoint URL (or https://kata.komireview.com)
+      - key: KATAGO_API_KEY
+        sync: false
+      - key: KATAGO_VISITS
+        value: "300"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: gemini

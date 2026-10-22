@@ -12,10 +12,8 @@
  *  - Results feed into the tutoring pipeline for richer "compare and contrast" explanations
  */
 
-import { analyzePosition } from './katagoService';
 import type {
   KataGoAnalysis,
-  SemanticAnnotation,
   FullGameAnalysis,
   DeepAnalysisBudget,
   DeepAnalysisResult,
@@ -23,6 +21,17 @@ import type {
   VariationEval,
   StoneColor,
 } from './types';
+
+/**
+ * Engine access is injected: the browser passes katagoService.analyzePosition,
+ * the server passes the remote/local engine adapter. A hardcoded import here
+ * would drag browser fetch endpoints into the Node review queue.
+ */
+export type AnalyzePositionFn = (
+  moves: string[],
+  komi: number,
+  currentPlayer: StoneColor,
+) => Promise<KataGoAnalysis | null>;
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -138,39 +147,6 @@ export function detectAmbiguousPositions(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the move list for a position in a game up to a given move number.
- * Format: ["B", "D4", "W", "Q16", ...]
- *
- * This reconstructs the moves from the annotations, which store moveNumber
- * and engineTopMove. We need the actual game moves, which we reconstruct
- * from the position data.
- */
-function buildMovesUpTo(
-  positions: KataGoAnalysis[],
-  annotations: SemanticAnnotation[],
-  upToMoveNumber: number,
-): { moveList: string[]; currentPlayer: StoneColor } {
-  // The positions array has N+1 entries for N moves.
-  // Position 0 = empty board, position i = after move i.
-  // Each position records its currentPlayer (who is to move NEXT).
-  // The move list we need is the sequence of moves played.
-
-  // We can reconstruct the move list from positions:
-  // Position[i-1].currentPlayer tells us who played move i
-  // But we don't have the actual move coordinates stored on positions.
-  // The annotations have engineTopMove but not the actual played move.
-
-  // Instead: use position data to determine colors, and rely on the fact
-  // that the proxy was originally called with the game's move list.
-  // Since we don't store the move list on FullGameAnalysis, we need a
-  // different approach: pass the move list in from the orchestrator.
-
-  // For now, we'll accept a pre-built move list from the orchestrator.
-  // This function becomes a no-op placeholder.
-  throw new Error('Use exploreVariationsWithMoves instead');
-}
-
-/**
  * Explore candidate variations for ambiguous positions.
  *
  * For each ambiguous position, queries KataGo with each top candidate move
@@ -182,13 +158,15 @@ function buildMovesUpTo(
  * @param komi - Game komi
  * @param budget - Budget controls
  * @param onProgress - Optional progress callback
+ * @param analyzePosition - Injected engine query (see AnalyzePositionFn)
  */
 export async function exploreVariations(
   ambiguous: AmbiguousPosition[],
   gameMoves: string[],
   komi: number,
   budget: DeepAnalysisBudget = DEFAULT_BUDGET,
-  onProgress?: (completed: number, total: number) => void,
+  onProgress: ((completed: number, total: number) => void) | undefined,
+  analyzePosition: AnalyzePositionFn,
 ): Promise<DeepAnalysisResult> {
   const explorations = new Map<number, VariationExploration>();
   let apiCallsUsed = 0;

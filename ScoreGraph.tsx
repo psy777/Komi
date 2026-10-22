@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import type { SemanticAnnotation, MoveClassification } from './types';
+import { StoneColor } from './types';
 
 const CLASSIFICATION_COLORS: Record<MoveClassification, string> = {
   brilliant: '#2196F3',
@@ -33,18 +34,16 @@ const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMov
   const { points, pathD } = useMemo(() => {
     if (annotations.length === 0) return { points: [], pathD: '' };
 
-    const pts = annotations.map((ann) => {
-      // Compute cumulative score lead from score deltas
-      // We use scoreDelta accumulated — but we actually need absolute score at each move.
-      // Since annotations have scoreDelta (change per move), we track running score.
-      return ann;
-    });
-
-    // Build running score from deltas
+    // Build running score from deltas.
+    // Black's good moves (positive delta) increase Black's advantage;
+    // White's good moves (positive delta for White) decrease Black's advantage.
     let runningScore = 0;
     const scores: { moveNumber: number; score: number; classification: MoveClassification }[] = [];
-    for (const ann of pts) {
-      runningScore += ann.scoreDelta;
+    for (const ann of annotations) {
+      const isBlack = ann.color
+        ? ann.color === StoneColor.BLACK
+        : ann.moveNumber % 2 === 1; // fallback: odd = Black
+      runningScore += isBlack ? ann.scoreDelta : -ann.scoreDelta;
       scores.push({
         moveNumber: ann.moveNumber,
         score: runningScore,
@@ -113,9 +112,9 @@ const ScoreGraph: React.FC<ScoreGraphProps> = ({ annotations, currentMove, onMov
         <text x={PAD_X - 4} y={PAD_Y + PLOT_H / 2 + 3} textAnchor="end" fontSize="8" fill="#64748b">0</text>
         <text x={PAD_X - 4} y={PAD_Y + PLOT_H} textAnchor="end" fontSize="8" fill="#64748b">-{SCORE_CAP}</text>
 
-        {/* Black/White territory shading */}
-        <rect x={PAD_X} y={PAD_Y} width={PLOT_W} height={PLOT_H / 2} fill="#fff" opacity="0.02" />
-        <rect x={PAD_X} y={PAD_Y + PLOT_H / 2} width={PLOT_W} height={PLOT_H / 2} fill="#000" opacity="0.05" />
+        {/* Black/White territory shading — top half = B+, bottom half = W+ */}
+        <rect x={PAD_X} y={PAD_Y} width={PLOT_W} height={PLOT_H / 2} fill="#000" opacity="0.05" />
+        <rect x={PAD_X} y={PAD_Y + PLOT_H / 2} width={PLOT_W} height={PLOT_H / 2} fill="#fff" opacity="0.03" />
 
         {/* Score line */}
         <path d={pathD} fill="none" stroke="#10b981" strokeWidth="1.5" strokeLinejoin="round" />

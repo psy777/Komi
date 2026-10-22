@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  classifyMove,
+  computeMoveQuality,
+  classifyByPointsLost,
   detectMistakeType,
   detectGamePhase,
   detectThemes,
@@ -56,69 +57,87 @@ function makeAnnotation(overrides: Partial<SemanticAnnotation> = {}): SemanticAn
 }
 
 // ---------------------------------------------------------------------------
-// classifyMove
+// computeMoveQuality — points-lost classification (real engine data)
 // ---------------------------------------------------------------------------
 
-describe('classifyMove', () => {
-  it('classifies a neutral move (small score change)', () => {
-    // Before: mover leads by 2.0. After (opponent POV): opponent trails by 1.8
-    // scoreDelta = -(-1.8) - 2.0 = 1.8 - 2.0 = -0.2 → neutral
-    const before = makeEval({ scoreLead: 2.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -1.8, winrate: 0.45 }); // opponent POV
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('neutral');
-    expect(result.scoreDelta).toBeCloseTo(-0.2, 1);
+describe('computeMoveQuality', () => {
+  // pointsLost = scoreLead(best) - scoreLead(played), from the mover's POV.
+  // Default moveInfos: best = D4 (scoreLead 0), 2nd = Q16 (scoreLead -0.2).
+  // Scores are Black-perspective (reportAnalysisWinratesAs=BLACK).
+
+  it('classifies the engine best move as good (≈0 points lost)', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: 0 });
+    const r = computeMoveQuality(before, after, 'D4', 'B');
+    expect(r.pointsLost).toBeCloseTo(0, 1);
+    expect(r.scoreDelta).toBeCloseTo(0, 1);
+    expect(r.classification).toBe('good');
   });
 
-  it('classifies a blunder (huge score loss)', () => {
-    // Before: mover leads by 5.0. After (opponent): opponent leads by 3.0
-    // scoreDelta = -(3.0) - 5.0 = -3.0 - 5.0 = -8.0 → blunder
-    const before = makeEval({ scoreLead: 5.0, winrate: 0.7 });
-    const after  = makeEval({ scoreLead: 3.0, winrate: 0.65 });
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('blunder');
-    expect(result.scoreDelta).toBeLessThan(-5.0);
+  it('falls back to the resulting position when the move is not a candidate', () => {
+    // Black plays an off-list move; resulting Black-score is -3 → lost 3 pts → mistake
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -3 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.pointsLost).toBeCloseTo(3, 1);
+    expect(r.scoreDelta).toBeCloseTo(-3, 1);
+    expect(r.classification).toBe('mistake');
   });
 
-  it('classifies a brilliant move (large positive delta)', () => {
-    // Before: mover leads by 1.0. After (opponent): opponent trails by 4.0
-    // scoreDelta = -(-4.0) - 1.0 = 4.0 - 1.0 = 3.0 → brilliant
-    const before = makeEval({ scoreLead: 1.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -4.0, winrate: 0.3 });
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('brilliant');
-    expect(result.scoreDelta).toBeGreaterThan(2.0);
+  it('computes points lost from White\'s perspective (lower Black-score is better)', () => {
+    // White's best leaves Black at 0; played move leaves Black at +4 → White lost 4 → mistake
+    const before = makeEval({ currentPlayer: StoneColor.WHITE });
+    const after  = makeEval({ scoreLead: 4 });
+    const r = computeMoveQuality(before, after, 'T1', 'W');
+    expect(r.pointsLost).toBeCloseTo(4, 1);
+    expect(r.classification).toBe('mistake');
   });
 
-  it('classifies a mistake (moderate loss)', () => {
-    // scoreDelta = -(1.0) - 2.0 = -3.0 → mistake
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: 1.0 });
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('mistake');
+  it('classifies a small loss as inaccuracy', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -1.5 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.classification).toBe('inaccuracy');
   });
 
-  it('classifies an inaccuracy (small loss)', () => {
-    // scoreDelta = -(-0.5) - 2.0 = 0.5 - 2.0 = -1.5 → inaccuracy
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: -0.5 });
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('inaccuracy');
+  it('classifies a large loss as a blunder', () => {
+    const before = makeEval({});
+    const after  = makeEval({ scoreLead: -8 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.classification).toBe('blunder');
   });
 
-  it('classifies a good move', () => {
-    // scoreDelta = -(- 2.0) - 1.0 = 2.0 - 1.0 = 1.0 → good
-    const before = makeEval({ scoreLead: 1.0 });
-    const after  = makeEval({ scoreLead: -2.0 });
-    const result = classifyMove(before, after);
-    expect(result.classification).toBe('good');
+  it('classifies the only good move in a hard position as brilliant', () => {
+    // Best move is 4 pts better than the 2nd best, and the player found it.
+    const before = makeEval({
+      moveInfos: [
+        { move: 'D4', visits: 80, winrate: 0.6, scoreLead: 5.0, prior: 0.4, pv: ['D4'] },
+        { move: 'Q16', visits: 20, winrate: 0.45, scoreLead: 1.0, prior: 0.2, pv: ['Q16'] },
+      ],
+    });
+    const after = makeEval({ scoreLead: 5.0 });
+    const r = computeMoveQuality(before, after, 'D4', 'B');
+    expect(r.classification).toBe('brilliant');
   });
 
-  it('computes winrate delta correctly', () => {
-    const before = makeEval({ scoreLead: 0, winrate: 0.5 });
-    const after  = makeEval({ scoreLead: 0, winrate: 0.4 }); // opponent has 0.4 → mover has 0.6
-    const result = classifyMove(before, after);
-    expect(result.winrateDelta).toBeCloseTo(0.1, 2);
+  it('computes winrate lost vs the best move', () => {
+    const before = makeEval({
+      moveInfos: [{ move: 'D4', visits: 80, winrate: 0.6, scoreLead: 0, prior: 0.3, pv: ['D4'] }],
+    });
+    const after = makeEval({ winrate: 0.5 });
+    const r = computeMoveQuality(before, after, 'T1', 'B');
+    expect(r.winrateLost).toBeCloseTo(0.1, 2);
+  });
+});
+
+describe('classifyByPointsLost', () => {
+  it('maps points-lost tiers correctly', () => {
+    expect(classifyByPointsLost(0.2, 0)).toBe('good');
+    expect(classifyByPointsLost(0.2, 4)).toBe('brilliant'); // hard position
+    expect(classifyByPointsLost(0.8, 0)).toBe('neutral');
+    expect(classifyByPointsLost(1.5, 0)).toBe('inaccuracy');
+    expect(classifyByPointsLost(3.0, 0)).toBe('mistake');
+    expect(classifyByPointsLost(9.0, 0)).toBe('blunder');
   });
 });
 
@@ -127,66 +146,46 @@ describe('classifyMove', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectMistakeType', () => {
+  // New signature: detectMistakeType(actualMove, engineTopMove, classification, scoreDelta, moverWinrate)
+
   it('returns undefined for non-mistakes', () => {
-    const before = makeEval({ scoreLead: 1.0 });
-    const after  = makeEval({ scoreLead: -1.2 }); // small positive delta
-    const result = detectMistakeType('D4', 'D4', before, after);
+    const result = detectMistakeType('D4', 'D4', 'good', 1.0, 0.5);
     expect(result).toBeUndefined();
   });
 
   it('detects direction error (different board region)', () => {
     // Played in top-left, engine wanted bottom-right → direction
-    const before = makeEval({ scoreLead: 3.0 });
-    const after  = makeEval({ scoreLead: 0.0 }); // scoreDelta = 0 - 3 = -3 → mistake
-    const result = detectMistakeType('C17', 'R3', before, after);
+    const result = detectMistakeType('C17', 'R3', 'mistake', -3.0, 0.5);
     expect(result).toBe('direction');
   });
 
   it('detects timing error (large distance between moves)', () => {
-    // Played at D4, engine wanted D16 — same column but far apart
-    const before = makeEval({ scoreLead: 3.0 });
-    const after  = makeEval({ scoreLead: 0.0 });
-    const result = detectMistakeType('D4', 'D16', before, after);
+    // Both A19 and A10 are in the top-left region but far apart (distance=9 > 8)
+    const result = detectMistakeType('A19', 'A10', 'mistake', -3.0, 0.5);
     expect(result).toBe('timing');
   });
 
   it('detects shape error (close moves, same region)', () => {
     // Played D4, engine wanted E5 — very close, same region → shape
-    const before = makeEval({ scoreLead: 2.0 });
-    const after  = makeEval({ scoreLead: 0.7 }); // scoreDelta = -0.7 - 2.0 = -2.7 → mistake
-    const result = detectMistakeType('D4', 'E5', before, after);
+    const result = detectMistakeType('D4', 'E5', 'mistake', -2.7, 0.5);
     expect(result).toBe('shape');
   });
 
   it('detects overplay (losing side plays aggressively)', () => {
     // Mover was behind (winrate 0.3), blunders further
-    const before = makeEval({ scoreLead: -5.0, winrate: 0.3 });
-    const after  = makeEval({ scoreLead: 3.0 }); // scoreDelta = -3 - (-5) = -3+5= ... wait
-    // scoreDelta = -(3.0) - (-5.0) = -3 + 5 = 2.0 that's positive... need bigger loss
-    // Let's make it clearer: before scoreLead = -3 (behind), after opponent has +10
-    const before2 = makeEval({ scoreLead: -3.0, winrate: 0.3 });
-    const after2  = makeEval({ scoreLead: 10.0 }); // scoreDelta = -10 - (-3) = -7 → blunder
-    const result = detectMistakeType('D4', 'E5', before2, after2);
+    const result = detectMistakeType('D4', 'E5', 'blunder', -7.0, 0.3);
     expect(result).toBe('overplay');
   });
 
   it('detects passivity (winning side loses advantage)', () => {
-    const before = makeEval({ scoreLead: 8.0, winrate: 0.75 });
-    const after  = makeEval({ scoreLead: -4.0 }); // scoreDelta = 4.0 - 8.0 = -4.0 → mistake
-    // Mover was ahead (0.75) and lost ground → passivity
-    const result = detectMistakeType('D4', 'E5', before, after);
+    // Mover was ahead (winrate 0.75) and lost ground → passivity
+    const result = detectMistakeType('D4', 'E5', 'mistake', -4.0, 0.75);
     expect(result).toBe('passivity');
   });
 
   it('defaults to reading for ambiguous mistakes', () => {
-    // Same region, not particularly close or far, moderate loss
-    const before = makeEval({ scoreLead: 2.0, winrate: 0.55 });
-    const after  = makeEval({ scoreLead: -1.0 }); // scoreDelta = 1.0 - 2.0 = -1.0... that's inaccuracy not mistake
-    // Need bigger loss in same region
-    const before2 = makeEval({ scoreLead: 4.0, winrate: 0.55 });
-    const after2  = makeEval({ scoreLead: 2.0 }); // scoreDelta = -2 - 4 = -6 → blunder
-    // D10 and F8 are both center-ish, ~4 apart
-    const result = detectMistakeType('D10', 'F8', before2, after2);
+    // D4 and H4 are both bottom-left region, distance=4 (not shape ≤3, not timing >8)
+    const result = detectMistakeType('D4', 'H4', 'blunder', -6.0, 0.55);
     expect(result).toBe('reading');
   });
 });
@@ -237,9 +236,9 @@ describe('detectGamePhase', () => {
 
 describe('detectThemes', () => {
   it('detects momentum_shift on large winrate change', () => {
+    // New formula: winrateDelta = before - after = 0.4 - 0.8 = -0.4, |delta| > 0.1
     const before = makeEval({ winrate: 0.4 });
-    const after  = makeEval({ winrate: 0.8 }); // opponent 0.8 → mover 0.2, delta = -0.2
-    // Actually: winrateAfter (mover) = 1 - 0.8 = 0.2, delta = 0.2 - 0.4 = -0.2 → |delta| > 0.1
+    const after  = makeEval({ winrate: 0.8 });
     const themes = detectThemes(before, after);
     expect(themes).toContain('momentum_shift');
   });
@@ -257,8 +256,9 @@ describe('detectThemes', () => {
   });
 
   it('detects endgame_technique for late small-delta moves', () => {
-    const before = makeEval({ scoreLead: 3.0, turnNumber: 200 });
-    const after  = makeEval({ scoreLead: -3.5 }); // delta = 3.5 - 3.0 = 0.5
+    // New formula: delta = before - after. Small |delta| + late game → endgame technique
+    const before = makeEval({ scoreLead: -20.0, turnNumber: 200 });
+    const after  = makeEval({ scoreLead: -20.5 }); // delta = -20.0 - (-20.5) = 0.5
     const themes = detectThemes(before, after);
     expect(themes).toContain('endgame_technique');
   });
@@ -301,7 +301,7 @@ describe('identifyKeyMoments', () => {
     expect(identifyKeyMoments([])).toEqual([]);
   });
 
-  it('marks blunders as key moments', () => {
+  it('marks blunders as key moments with big_mistake reason', () => {
     const anns = [
       makeAnnotation({ moveNumber: 1, classification: 'neutral', scoreDelta: 0 }),
       makeAnnotation({ moveNumber: 50, classification: 'blunder', scoreDelta: -8.0 }),
@@ -309,6 +309,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('big_mistake');
   });
 
   it('marks game phase transitions as key moments', () => {
@@ -318,6 +319,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('phase_transition');
   });
 
   it('marks brilliant moves as key moments', () => {
@@ -326,6 +328,7 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('brilliant_play');
   });
 
   it('respects maxKeyMoments limit', () => {
@@ -345,5 +348,96 @@ describe('identifyKeyMoments', () => {
     ];
     const result = identifyKeyMoments(anns);
     expect(result[1].isKeyMoment).toBe(true);
+  });
+
+  // --- Game trajectory tests (with positions) ---
+
+  it('detects lead change when winrate crosses 0.5', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'neutral', scoreDelta: 0 }),
+      makeAnnotation({ moveNumber: 2, classification: 'inaccuracy', scoreDelta: -1.5 }),
+    ];
+    // positions[0] = before move 1, positions[1] = after move 1 / before move 2, positions[2] = after move 2
+    const positions = [
+      makeEval({ winrate: 0.55 }),  // Black ahead
+      makeEval({ winrate: 0.52 }),  // Still Black
+      makeEval({ winrate: 0.45 }),  // Now White ahead — lead change on move 2
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[1].isKeyMoment).toBe(true);
+    expect(result[1].keyMomentReason).toBe('lead_change');
+  });
+
+  it('detects decisive blow when game goes from competitive to decided', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'brilliant', scoreDelta: 3.0 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.60 }),  // Competitive (within 0.30-0.70)
+      makeEval({ winrate: 0.78 }),  // Decided (> 0.70)
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('decisive_blow');
+  });
+
+  it('detects missed opportunity when engine move would have been decisive', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'inaccuracy', scoreDelta: -1.5 }),
+    ];
+    // Engine's top move would push to 0.75 (decisive), but played move stays at 0.58 (competitive)
+    const positions = [
+      makeEval({
+        winrate: 0.60,
+        moveInfos: [
+          { move: 'D4', visits: 80, winrate: 0.75, scoreLead: 8.0, prior: 0.4, pv: ['D4'] },
+          { move: 'Q16', visits: 20, winrate: 0.58, scoreLead: 2.0, prior: 0.2, pv: ['Q16'] },
+        ],
+      }),
+      makeEval({ winrate: 0.58 }),
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('missed_opportunity');
+  });
+
+  it('gives closeness boost to moments in competitive positions', () => {
+    // Two identical blunders, but one in a close game, one in a decided game
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'mistake', scoreDelta: -3.5 }),
+      makeAnnotation({ moveNumber: 2, classification: 'mistake', scoreDelta: -3.5 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.50 }),  // Very close — move 1 gets closeness boost
+      makeEval({ winrate: 0.48 }),
+      makeEval({ winrate: 0.85 }),  // Already decided — move 2 gets no boost
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    // Both should be key moments but move 1 should have higher priority
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[1].isKeyMoment).toBe(true);
+  });
+
+  it('works without positions (backward compatibility)', () => {
+    const anns = [
+      makeAnnotation({ moveNumber: 50, classification: 'blunder', scoreDelta: -8.0 }),
+    ];
+    const result = identifyKeyMoments(anns);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('big_mistake');
+  });
+
+  it('lead_change takes priority over classification-based reasons', () => {
+    // A blunder that also causes a lead change should be labeled as lead_change
+    const anns = [
+      makeAnnotation({ moveNumber: 1, classification: 'blunder', scoreDelta: -8.0 }),
+    ];
+    const positions = [
+      makeEval({ winrate: 0.55 }),  // Black ahead
+      makeEval({ winrate: 0.40 }),  // White ahead — lead change
+    ];
+    const result = identifyKeyMoments(anns, positions);
+    expect(result[0].isKeyMoment).toBe(true);
+    expect(result[0].keyMomentReason).toBe('lead_change');
   });
 });

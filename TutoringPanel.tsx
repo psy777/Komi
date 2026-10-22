@@ -108,6 +108,7 @@ export interface TutoringPanelProps {
   playerLevel: PlayerLevel;
   analysis: FullGameAnalysis;
   onShowEngineLine?: () => void;
+  onShowRefutation?: () => void;
   onNavigateToMove?: (moveNumber: number) => void;
 }
 
@@ -117,6 +118,7 @@ const TutoringPanel: React.FC<TutoringPanelProps> = ({
   playerLevel,
   analysis,
   onShowEngineLine,
+  onShowRefutation,
   onNavigateToMove,
 }) => {
   const [tutoring, setTutoring] = useState<TutoringExplanation | null>(null);
@@ -333,15 +335,25 @@ const TutoringPanel: React.FC<TutoringPanelProps> = ({
         </div>
       )}
 
-      {/* === Show engine line button === */}
-      {annotation.enginePV.length > 0 && (
-        <button
-          onClick={onShowEngineLine}
-          className="w-full text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-900/20 hover:bg-emerald-900/40 border border-emerald-800/30 rounded-lg py-1.5 transition-all font-medium"
-        >
-          Show Engine Line ({annotation.enginePV.length} moves)
-        </button>
-      )}
+      {/* === Engine line buttons === */}
+      <div className="flex gap-2">
+        {annotation.enginePV.length > 0 && (
+          <button
+            onClick={onShowEngineLine}
+            className="flex-1 text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-900/20 hover:bg-emerald-900/40 border border-emerald-800/30 rounded-lg py-1.5 transition-all font-medium"
+          >
+            Engine Line ({annotation.enginePV.length} moves)
+          </button>
+        )}
+        {annotation.refutationPV && annotation.refutationPV.length > 0 && (
+          <button
+            onClick={onShowRefutation}
+            className="flex-1 text-xs text-red-400 hover:text-red-300 bg-red-900/20 hover:bg-red-900/40 border border-red-800/30 rounded-lg py-1.5 transition-all font-medium"
+          >
+            Refutation ({annotation.refutationPV.length} moves)
+          </button>
+        )}
+      </div>
 
       {/* === Drill-down section === */}
       {tutoring && !isLoading && (

@@ -157,6 +157,16 @@ export type MistakeType = 'direction' | 'shape' | 'reading' | 'timing' | 'overpl
 
 export type GamePhase = 'opening' | 'middlegame' | 'endgame';
 
+/** Why a move was flagged as a key moment — describes the game-shifting nature */
+export type KeyMomentReason =
+  | 'lead_change'        // Advantage flipped between players
+  | 'decisive_blow'      // Game went from competitive to decided
+  | 'missed_opportunity' // Player could have taken decisive lead but didn't
+  | 'big_mistake'        // Blunder or major mistake that shifted the game
+  | 'brilliant_play'     // Outstanding move that shifted evaluation
+  | 'momentum_shift'     // Large evaluation swing in a competitive position
+  | 'phase_transition';  // Opening→middlegame or middlegame→endgame
+
 /** Pattern/formation detected by boardmatcher */
 export interface PatternInfo {
   name: string;
@@ -167,15 +177,27 @@ export interface PatternInfo {
 /** Semantic annotation for a single move in a game */
 export interface SemanticAnnotation {
   moveNumber: number;
+  /** Color of the player who made this move */
+  color?: StoneColor;
   classification: MoveClassification;
   mistakeType?: MistakeType;
+  /** Signed score change vs best move (= -pointsLost; 0 = optimal, negative = worse). */
   scoreDelta: number;
+  /** Signed winrate change vs best move (= -winrateLost). */
   winrateDelta: number;
+  /** Points lost vs the engine's best move, from the mover's perspective (>= 0). */
+  pointsLost?: number;
+  /** Winrate lost vs the engine's best move, from the mover's perspective (>= 0). */
+  winrateLost?: number;
   gamePhase: GamePhase;
   themes: string[];
   engineTopMove: string;
   enginePV: string[];
+  /** Opponent's best continuation after the played move (shows punishment for mistakes) */
+  refutationPV?: string[];
   isKeyMoment: boolean;
+  /** Why this move was flagged as a key moment (set when isKeyMoment is true) */
+  keyMomentReason?: KeyMomentReason;
   commentary?: string;
   /** Pattern/formation detected at this move (e.g. "Tiger's Mouth", "3-3 Point Invasion") */
   pattern?: PatternInfo;
@@ -215,6 +237,21 @@ export interface TutoringExplanation {
   followUpHint?: string;
 }
 
+/**
+ * Human-readable summary of the KataGo ownership map, used to ground the
+ * tutoring explanation in concrete territory facts instead of guesswork.
+ * Point values are in Black's favor when positive (matching the engine's
+ * reportAnalysisWinratesAs=BLACK convention).
+ */
+export interface OwnershipSummary {
+  /** Net territory swing per board region caused by the move just played. */
+  deltaRegions: Array<{ region: string; points: number; towards: StoneColor }>;
+  /** Current territorial control by region (after the move). */
+  territory: Array<{ region: string; controller: StoneColor | 'contested'; points: number }>;
+  /** Total absolute swing — how much the move changed the board overall. */
+  totalSwing: number;
+}
+
 /** Input context assembled by the tutoring pipeline's context builder */
 export interface TutoringContext {
   annotation: SemanticAnnotation;
@@ -237,6 +274,8 @@ export interface TutoringContext {
   };
   /** Deep analysis results for ambiguous positions (Phase D) */
   deepAnalysis?: VariationExploration;
+  /** Territory swing + control derived from the KataGo ownership map */
+  ownership?: OwnershipSummary;
 }
 
 // --- Deep Analysis Types (Phase D) ---

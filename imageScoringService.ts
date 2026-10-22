@@ -133,9 +133,13 @@ export function fileToBase64(file: File): Promise<string> {
       const result = reader.result as string;
       // Strip the "data:image/...;base64," prefix
       const base64 = result.split(",")[1];
+      if (!base64) {
+        reject(new Error("Failed to encode image as base64. The file may be corrupted."));
+        return;
+      }
       resolve(base64);
     };
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error("Failed to read the image file."));
     reader.readAsDataURL(file);
   });
 }

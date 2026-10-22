@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
 import { StoneColor, Coordinate, MoveClassification } from './types';
-import { BOARD_SIZE } from './goLogic';
 
 export interface MoveAnnotation {
   x: number;
@@ -36,21 +35,35 @@ interface GoBoardProps {
   showOwnership?: boolean;
 }
 
-const STAR_POINTS = [
-  { x: 3, y: 3 }, { x: 9, y: 3 }, { x: 15, y: 3 },
-  { x: 3, y: 9 }, { x: 9, y: 9 }, { x: 15, y: 9 },
-  { x: 3, y: 15 }, { x: 9, y: 15 }, { x: 15, y: 15 },
-];
+function getStarPoints(size: number): { x: number; y: number }[] {
+  if (size === 19) return [
+    { x: 3, y: 3 }, { x: 9, y: 3 }, { x: 15, y: 3 },
+    { x: 3, y: 9 }, { x: 9, y: 9 }, { x: 15, y: 9 },
+    { x: 3, y: 15 }, { x: 9, y: 15 }, { x: 15, y: 15 },
+  ];
+  if (size === 13) return [
+    { x: 3, y: 3 }, { x: 6, y: 3 }, { x: 9, y: 3 },
+    { x: 3, y: 6 }, { x: 6, y: 6 }, { x: 9, y: 6 },
+    { x: 3, y: 9 }, { x: 6, y: 9 }, { x: 9, y: 9 },
+  ];
+  if (size === 9) return [
+    { x: 2, y: 2 }, { x: 6, y: 2 },
+    { x: 4, y: 4 },
+    { x: 2, y: 6 }, { x: 6, y: 6 },
+  ];
+  return [];
+}
 
 const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, markers, moveAnnotations, pvStones, ownershipData, showOwnership }) => {
+  const size = grid.length;
   const cellSize = 30;
   const padding = 30;
-  const boardPixelSize = (BOARD_SIZE - 1) * cellSize + padding * 2;
+  const boardPixelSize = (size - 1) * cellSize + padding * 2;
 
   // Render Grid Lines
   const gridLines = useMemo(() => {
     const lines = [];
-    for (let i = 0; i < BOARD_SIZE; i++) {
+    for (let i = 0; i < size; i++) {
       // Vertical
       lines.push(
         <line
@@ -77,10 +90,10 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
       );
     }
     return lines;
-  }, [boardPixelSize]);
+  }, [boardPixelSize, size]);
 
   // Render Star Points
-  const starPoints = STAR_POINTS.map((p, i) => (
+  const starPoints = getStarPoints(size).map((p, i) => (
     <circle
       key={`star-${i}`}
       cx={padding + p.x * cellSize}
@@ -92,8 +105,8 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
 
   // Render Stones
   const stones = [];
-  for (let y = 0; y < BOARD_SIZE; y++) {
-    for (let x = 0; x < BOARD_SIZE; x++) {
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
       const stone = grid[y][x];
       if (stone !== StoneColor.EMPTY) {
         const cx = padding + x * cellSize;
@@ -154,11 +167,11 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
 
   // Ownership Heatmap overlay
   const ownershipOverlay = useMemo(() => {
-    if (!showOwnership || !ownershipData || ownershipData.length !== BOARD_SIZE * BOARD_SIZE) return null;
+    if (!showOwnership || !ownershipData || ownershipData.length !== size * size) return null;
     const rects = [];
-    for (let y = 0; y < BOARD_SIZE; y++) {
-      for (let x = 0; x < BOARD_SIZE; x++) {
-        const val = ownershipData[y * BOARD_SIZE + x];
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const val = ownershipData[y * size + x];
         if (Math.abs(val) < 0.05) continue;
         const cx = padding + x * cellSize;
         const cy = padding + y * cellSize;
@@ -179,7 +192,7 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
       }
     }
     return rects;
-  }, [ownershipData, showOwnership, padding, cellSize]);
+  }, [ownershipData, showOwnership, padding, cellSize, size]);
 
   // PV Ghost Stones
   const pvOverlay = useMemo(() => {
@@ -217,8 +230,8 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
 
   // Click Handlers (transparent rects over intersections)
   const clickTargets = [];
-  for (let y = 0; y < BOARD_SIZE; y++) {
-    for (let x = 0; x < BOARD_SIZE; x++) {
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
       clickTargets.push(
         <rect
           key={`click-${x}-${y}`}
@@ -237,15 +250,15 @@ const GoBoard: React.FC<GoBoardProps> = ({ grid, lastMove, onIntersectionClick, 
   // Coordinates
   const coords = [];
   const coordLabels = 'ABCDEFGHJKLMNOPQRST';
-  for (let i = 0; i < BOARD_SIZE; i++) {
+  for (let i = 0; i < size; i++) {
     // Top
     coords.push(<text key={`ct-${i}`} x={padding + i * cellSize} y={padding - 15} textAnchor="middle" fontSize="12" fill="#444" className="font-sans font-bold select-none">{coordLabels[i]}</text>);
     // Bottom
     coords.push(<text key={`cb-${i}`} x={padding + i * cellSize} y={boardPixelSize - padding + 20} textAnchor="middle" fontSize="12" fill="#444" className="font-sans font-bold select-none">{coordLabels[i]}</text>);
     // Left
-    coords.push(<text key={`cl-${i}`} x={padding - 15} y={padding + i * cellSize + 4} textAnchor="end" fontSize="12" fill="#444" className="font-sans font-bold select-none">{BOARD_SIZE - i}</text>);
+    coords.push(<text key={`cl-${i}`} x={padding - 15} y={padding + i * cellSize + 4} textAnchor="end" fontSize="12" fill="#444" className="font-sans font-bold select-none">{size - i}</text>);
     // Right
-    coords.push(<text key={`cr-${i}`} x={boardPixelSize - padding + 15} y={padding + i * cellSize + 4} textAnchor="start" fontSize="12" fill="#444" className="font-sans font-bold select-none">{BOARD_SIZE - i}</text>);
+    coords.push(<text key={`cr-${i}`} x={boardPixelSize - padding + 15} y={padding + i * cellSize + 4} textAnchor="start" fontSize="12" fill="#444" className="font-sans font-bold select-none">{size - i}</text>);
   }
 
   return (

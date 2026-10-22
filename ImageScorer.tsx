@@ -26,11 +26,17 @@ const ImageScorer: React.FC<ImageScorerProps> = ({ onBack }) => {
       setError("Please upload an image file (JPEG, PNG, etc.).");
       return;
     }
+    const MAX_SIZE_MB = 20;
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+      setError(`Image is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum size is ${MAX_SIZE_MB} MB.`);
+      return;
+    }
     setImageFile(file);
     setResult(null);
     setError(null);
     const reader = new FileReader();
     reader.onload = (e) => setImagePreview(e.target?.result as string);
+    reader.onerror = () => setError("Failed to read the image file. Please try again.");
     reader.readAsDataURL(file);
   }, []);
 

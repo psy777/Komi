@@ -22,9 +22,12 @@ import type {
   MoveClassification,
   PatternInfo,
   VariationExploration,
+  OwnershipSummary,
 } from './types';
+import { StoneColor } from './types';
 import { LEVEL_INSTRUCTION_SETS } from './geminiService';
 import { geminiGenerate } from './geminiProxy';
+import { summarizeOwnership } from './ownershipSummary';
 
 // ---------------------------------------------------------------------------
 // Session cache: "moveNumber:playerLevel" -> TutoringExplanation
@@ -94,6 +97,10 @@ export function buildTutoringContext(
   // Deep analysis for this position (Phase D)
   const deepAnalysis = analysis.deepAnalysis?.explorations.get(moveNumber);
 
+  // Territory swing + control from the ownership maps (when the engine
+  // provided them — the proxy path leaves ownership null).
+  const ownership = summarizeOwnership(evalBefore?.ownership, evalAfter?.ownership) ?? undefined;
+
   return {
     annotation,
     playerLevel: level,
@@ -109,6 +116,7 @@ export function buildTutoringContext(
       ? surroundingMoments
       : undefined,
     deepAnalysis,
+    ownership,
   };
 }
 
@@ -184,6 +192,51 @@ IMPORTANT: Use this variation analysis to explain the CONCRETE CONSEQUENCES of e
 Explain what happens after each move, not just the numeric difference.`;
 }
 
+const sideName = (c: StoneColor | 'contested'): string =>
+  c === StoneColor.BLACK ? 'Black' : c === StoneColor.WHITE ? 'White' : 'contested';
+
+/**
+ * Format the KataGo ownership map into a prompt block: what the move changed
+ * territorially, and who currently controls each region. Empty when the engine
+ * didn't supply ownership (proxy path).
+ */
+function buildOwnershipBlock(own?: OwnershipSummary): string {
+  if (!own) return '';
+  const parts: string[] = [];
+
+  if (own.deltaRegions.length > 0) {
+    const lines = own.deltaRegions.map(
+      d => `  - ${d.region}: ~${d.points} pts toward ${sideName(d.towards)}`,
+    );
+    parts.push(`What this move changed (territory swing vs. the position before it):\n${lines.join('\n')}`);
+  } else if (own.totalSwing > 0) {
+    parts.push(`This move barely changed the territory map (total swing ~${own.totalSwing} pts) — it reinforced an already-settled area rather than affecting a contested one.`);
+  }
+
+  if (own.territory.length > 0) {
+    const lines = own.territory.map(
+      t => `  - ${t.region}: ${sideName(t.controller)} (~${t.points} pts)`,
+    );
+    parts.push(`Current territorial control:\n${lines.join('\n')}`);
+  }
+
+  if (parts.length === 0) return '';
+  return `
+OWNERSHIP MAP (from KataGo — ground territory claims in these facts, do not guess):
+${parts.join('\n')}
+`;
+}
+
+/**
+ * Shared guardrail appended to every prompt: keep terminology correct and every
+ * factual claim tied to the data we provided.
+ */
+const TERMINOLOGY_DISCIPLINE = `
+TERMINOLOGY & GROUNDING RULES:
+- Use standard Go terms accurately. If a pattern/shape name is given above, use that exact term; do NOT invent joseki, shape, or pattern names that were not provided.
+- Ground every territorial claim (who is ahead, whose area is whose, what a move gained) in the ownership and score data above. Do not assert control of an area the data does not support.
+- Refer to moves only by the board coordinates given. Do not invent coordinates or stones.`;
+
 function buildMistakePrompt(ctx: TutoringContext): string {
   const { annotation: ann, playerLevel } = ctx;
   const levelInstr = LEVEL_INSTRUCTION_SETS[playerLevel];
@@ -197,6 +250,7 @@ function buildMistakePrompt(ctx: TutoringContext): string {
     : '  (no alternatives available)';
 
   const deepBlock = buildDeepAnalysisBlock(ctx.deepAnalysis);
+  const ownBlock = buildOwnershipBlock(ctx.ownership);
 
   return `You are an expert Go (Baduk/Weiqi) tutor explaining a ${ann.classification} to a student.
 
@@ -218,9 +272,9 @@ ${alternativesBlock}
 CURRENT POSITION:
 - Score: ${ctx.gameContext.currentScore > 0 ? 'Black' : 'White'} leads by ${Math.abs(ctx.gameContext.currentScore).toFixed(1)}
 - Win Probability: Black ${(ctx.gameContext.currentWinrate * 100).toFixed(0)}%
-${deepBlock}
+${deepBlock}${ownBlock}
 INSTRUCTIONS:
-- Explain the NATURE of the error — not just that it was bad, but WHY it was bad.
+- Explain the NATURE of the error — not just that it was bad, but WHY it was bad.${ctx.ownership ? '\n- Use the ownership map to say concretely what the move did to the board (which area it affected, or that it added little) and where the contested points actually are.' : ''}
 - ${ann.mistakeType === 'direction' ? 'Focus on whole-board thinking. The player chose the wrong area of the board.' : ''}
 - ${ann.mistakeType === 'shape' ? 'Focus on local shape. The player made an inefficient or bad shape.' : ''}
 - ${ann.mistakeType === 'timing' ? 'Focus on timing/urgency. The player played in the wrong area at the wrong time.' : ''}
@@ -229,6 +283,7 @@ INSTRUCTIONS:
 - ${ann.mistakeType === 'passivity' ? 'The player was too conservative when they had the advantage.' : ''}
 - Compare the played move to the engine recommendation with specific reasoning.${ctx.deepAnalysis ? '\n- USE the variation analysis above to explain concrete consequences of each candidate move.' : ''}
 - Suggest a concept the student should study.
+${TERMINOLOGY_DISCIPLINE}
 
 ${STRUCTURED_OUTPUT_SCHEMA}`;
 }
@@ -240,6 +295,7 @@ function buildBrilliantPrompt(ctx: TutoringContext): string {
     ? `\nPATTERN: ${ctx.pattern.name} (${ctx.pattern.category})`
     : '';
   const deepBlock = buildDeepAnalysisBlock(ctx.deepAnalysis);
+  const ownBlock = buildOwnershipBlock(ctx.ownership);
 
   return `You are an expert Go (Baduk/Weiqi) tutor praising a brilliant move.
 
@@ -252,12 +308,13 @@ MOVE CONTEXT:
 - Winrate Delta: +${(ann.winrateDelta * 100).toFixed(1)}%
 - Engine Top Move: ${ann.engineTopMove}${patternBlock}
 - Themes: ${ann.themes.length > 0 ? ann.themes.join(', ') : 'none detected'}
-${deepBlock}
+${deepBlock}${ownBlock}
 INSTRUCTIONS:
 - Explain what made this move strong — the strategic or tactical insight behind it.
 - Connect it to a broader Go concept the student can learn from.
-- If a pattern was detected, explain its significance.${ctx.deepAnalysis ? '\n- USE the variation data to show WHY this move was better than the alternatives.' : ''}
+- If a pattern was detected, explain its significance.${ctx.ownership ? '\n- Use the ownership map to show concretely what the move secured or gained, and where.' : ''}${ctx.deepAnalysis ? '\n- USE the variation data to show WHY this move was better than the alternatives.' : ''}
 - Do NOT include "whatWasBetter" in your response — the move was already excellent.
+${TERMINOLOGY_DISCIPLINE}
 
 ${STRUCTURED_OUTPUT_SCHEMA}`;
 }
@@ -269,6 +326,7 @@ function buildNeutralPrompt(ctx: TutoringContext): string {
     ? `\nPATTERN: ${ctx.pattern.name} (${ctx.pattern.category})`
     : '';
   const deepBlock = buildDeepAnalysisBlock(ctx.deepAnalysis);
+  const ownBlock = buildOwnershipBlock(ctx.ownership);
 
   return `You are an expert Go (Baduk/Weiqi) tutor explaining a key moment in a game.
 
@@ -281,12 +339,13 @@ MOVE CONTEXT:
 - Winrate Delta: ${ann.winrateDelta > 0 ? '+' : ''}${(ann.winrateDelta * 100).toFixed(1)}%
 - Engine Top Move: ${ann.engineTopMove}
 - Themes: ${ann.themes.length > 0 ? ann.themes.join(', ') : 'none detected'}${patternBlock}
-${deepBlock}
+${deepBlock}${ownBlock}
 INSTRUCTIONS:
 - Explain why this moment is significant for the student's learning.
-- Focus on the strategic situation — what is the game about at this point?${ctx.deepAnalysis ? '\n- USE the variation analysis to illustrate how different choices lead to different outcomes.' : ''}
+- Focus on the strategic situation — what is the game about at this point?${ctx.ownership ? '\n- Use the ownership map to describe where territory currently stands and which areas are still contested.' : ''}${ctx.deepAnalysis ? '\n- USE the variation analysis to illustrate how different choices lead to different outcomes.' : ''}
 - If this is a game phase transition, explain how the priorities shift.
 - If the move was slightly off, mention the engine alternative briefly.
+${TERMINOLOGY_DISCIPLINE}
 
 ${STRUCTURED_OUTPUT_SCHEMA}`;
 }
