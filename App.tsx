@@ -16,8 +16,8 @@ import { StoneColor, BoardState, GameTree, GameNode, ChatMessage, AnalysisProgre
 import { createEmptyGrid, playMove } from './goLogic';
 import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
-import { analyzeGamePositions } from './katagoService';
-import { computeMoveQuality, detectMistakeType, detectGamePhase, detectThemes, identifyKeyMoments, estimatePlayerLevel } from './semanticExtractor';
+import { browserEngineAdapter } from './katagoService';
+import { runFullReview } from './reviewPipeline';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
@@ -354,156 +354,38 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
   const handleExportReview = () => downloadSgf(exportReviewSGF(gameTree, analysisResult), 'komi-review.sgf');
 
   // --- Analysis Handler ---
+  // Runs the shared review pipeline (same code the server queue uses) against
+  // the engine via the browser adapter. For ad-hoc/unsaved games; library
+  // games load the server-computed analysis instead.
   const handleAnalyzeGame = useCallback(async () => {
     if (isAnalyzing) return;
 
-    // Walk the main line to collect all moves
-    const mainLine: GameNode[] = [];
-    let ptr = gameTree.rootId;
+    // Need at least two moves on the main line for a meaningful review.
+    let moveCount = 0;
+    let ptr: string | undefined = gameTree.rootId;
     while (ptr) {
-      const node = gameTree.nodes[ptr];
-      mainLine.push(node);
-      ptr = node.childrenIds[0]; // Follow main line
+      const node: GameNode = gameTree.nodes[ptr];
+      if (node.move) moveCount++;
+      ptr = node.childrenIds[0];
     }
-
-    const moveNodes = mainLine.filter(n => n.move);
-    if (moveNodes.length < 2) return;
+    if (moveCount < 2) return;
 
     setIsAnalyzing(true);
     setAnalysisResult(null);
     clearExplanationCache();
 
-    const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
-    const toGtp = (x: number, y: number) => `${GTP_COLS[x]}${19 - y}`;
-
-    // Build [color, gtp] move pairs for a single shared-tree whole-game query.
-    const movePairs: Array<[string, string]> = moveNodes.map((node) => [
-      node.move!.color === StoneColor.BLACK ? 'B' : 'W',
-      toGtp(node.move!.x, node.move!.y),
-    ]);
-
-    // Phase 1: Engine analysis (one query analyzes every turn)
-    setAnalysisProgress({ phase: 'engine', current: 0, total: movePairs.length + 1 });
-
-    const analysisResults = await analyzeGamePositions(movePairs, komi, (completed, total) => {
-      setAnalysisProgress({ phase: 'engine', current: completed, total });
-    });
-
-    // Phase 2: Semantic classification
-    setAnalysisProgress({ phase: 'semantic', current: 0, total: moveNodes.length });
-
-    const annotations: SemanticAnnotation[] = [];
-    const classificationCounts: Record<string, number> = {
-      brilliant: 0, good: 0, neutral: 0, inaccuracy: 0, mistake: 0, blunder: 0,
-    };
-    const phaseBreakdown: Record<string, number> = { opening: 0, middlegame: 0, endgame: 0 };
-    const allThemes: Set<string> = new Set();
-
-    for (let i = 0; i < moveNodes.length; i++) {
-      const evalBefore = analysisResults[i];
-      const evalAfter = analysisResults[i + 1];
-
-      if (!evalBefore || !evalAfter) {
-        setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
-        continue;
-      }
-
-      const moveNode = moveNodes[i];
-      const moveGtp = toGtp(moveNode.move!.x, moveNode.move!.y);
-      const moverColor = moveNode.move!.color === StoneColor.BLACK ? 'B' : 'W';
-      const { classification, scoreDelta, winrateDelta, pointsLost, winrateLost } =
-        computeMoveQuality(evalBefore, evalAfter, moveGtp, moverColor);
-
-      // Board occupancy estimate
-      const stoneCount = i + 1;
-      const boardOccupancy = stoneCount / 361;
-
-      const gamePhase = detectGamePhase(i + 1, evalBefore.ownership, boardOccupancy);
-      const actualMoveInfo = evalBefore.moveInfos.find(m => m.move === moveGtp);
-      const themes = detectThemes(evalBefore, evalAfter, actualMoveInfo);
-      const engineTopMove = evalBefore.moveInfos[0]?.move ?? moveGtp;
-      const enginePV = evalBefore.moveInfos[0]?.pv ?? [engineTopMove];
-      // Opponent's best reply after the played move = the punishment line.
-      const refutationPV =
-        classification === 'mistake' || classification === 'blunder'
-          ? evalAfter.moveInfos[0]?.pv
-          : undefined;
-
-      classificationCounts[classification] = (classificationCounts[classification] ?? 0) + 1;
-      phaseBreakdown[gamePhase] = (phaseBreakdown[gamePhase] ?? 0) + 1;
-      themes.forEach(t => allThemes.add(t));
-
-      annotations.push({
-        moveNumber: i + 1,
-        color: moveNode.move!.color,
-        classification,
-        scoreDelta,
-        winrateDelta,
-        pointsLost,
-        winrateLost,
-        gamePhase,
-        themes,
-        engineTopMove,
-        enginePV,
-        refutationPV,
-        isKeyMoment: false,
+    try {
+      const result = await runFullReview(generateSGF(gameTree), browserEngineAdapter, {
+        onProgress: setAnalysisProgress,
       });
-
-      setAnalysisProgress({ phase: 'semantic', current: i + 1, total: moveNodes.length });
+      setAnalysisResult(result);
+    } catch (err) {
+      console.error('Game analysis failed:', err);
+      setAnalysisProgress(null);
+    } finally {
+      setIsAnalyzing(false);
     }
-
-    // Detect mistake types (real engine data needs no bias normalization)
-    for (let j = 0; j < annotations.length; j++) {
-      const ann = annotations[j];
-      const moveIdx = ann.moveNumber - 1;
-      const evalBefore = analysisResults[moveIdx];
-      if (!evalBefore) continue;
-
-      const actualMove = toGtp(moveNodes[moveIdx].move!.x, moveNodes[moveIdx].move!.y);
-      annotations[j] = {
-        ...ann,
-        mistakeType: detectMistakeType(
-          actualMove,
-          ann.engineTopMove,
-          ann.classification,
-          ann.scoreDelta,
-          evalBefore.rootInfo.winrate,
-        ),
-      };
-    }
-
-    // Identify key moments (pass positions for winrate-trajectory detection)
-    const annotationsWithKeys = identifyKeyMoments(annotations, analysisResults);
-    const keyMoments = annotationsWithKeys.filter(a => a.isKeyMoment);
-    const playerLevel = estimatePlayerLevel(annotationsWithKeys);
-
-    // Recount classifications
-    for (const cls of Object.keys(classificationCounts)) {
-      classificationCounts[cls] = 0;
-    }
-    for (const ann of annotationsWithKeys) {
-      classificationCounts[ann.classification] = (classificationCounts[ann.classification] ?? 0) + 1;
-    }
-
-    const result: FullGameAnalysis = {
-      sgfHash: '',
-      playerLevel,
-      positions: analysisResults.filter((r): r is NonNullable<typeof r> => r !== null),
-      annotations: annotationsWithKeys,
-      keyMoments,
-      summary: {
-        totalMoves: moveNodes.length,
-        classificationCounts: classificationCounts as any,
-        phaseBreakdown: phaseBreakdown as any,
-        themes: Array.from(allThemes),
-      },
-      analyzedAt: Date.now(),
-    };
-
-    setAnalysisResult(result);
-    setAnalysisProgress({ phase: 'complete', current: moveNodes.length, total: moveNodes.length });
-    setIsAnalyzing(false);
-  }, [gameTree, komi, isAnalyzing]);
+  }, [gameTree, isAnalyzing]);
 
   // Compute move annotations for GoBoard from analysis results
   const moveAnnotations: MoveAnnotation[] = React.useMemo(() => {

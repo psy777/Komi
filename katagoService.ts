@@ -1,4 +1,6 @@
 import type { KataGoAnalysis, KataGoMoveInfo, KataGoProxyResponse, StoneColor } from './types';
+import { mapNativeResult, currentPlayerAtTurn } from './katagoMapping';
+import type { EngineAdapter } from './reviewPipeline';
 
 // Local self-hosted KataGo analysis engine (served by server.js, proxied by
 // Vite at /api). Override with VITE_KATAGO_ENDPOINT if hosting elsewhere.
@@ -182,27 +184,6 @@ export const batchAnalyze = async (
     return results;
 };
 
-function mapNativeResult(raw: any, currentPlayer: StoneColor): KataGoAnalysis {
-  return {
-    moveInfos: (raw.moveInfos || []).map((m: any) => ({
-      move: m.move,
-      visits: m.visits,
-      winrate: m.winrate,
-      scoreLead: m.scoreLead,
-      prior: m.prior,
-      pv: m.pv || [m.move],
-    })),
-    rootInfo: {
-      winrate: raw.rootInfo?.winrate ?? 0.5,
-      scoreLead: raw.rootInfo?.scoreLead ?? 0,
-      visits: raw.rootInfo?.visits ?? 0,
-    },
-    ownership: raw.ownership ?? null,
-    turnNumber: raw.turnNumber ?? 0,
-    currentPlayer,
-  };
-}
-
 /**
  * Analyze every position of a game in a SINGLE shared-tree query.
  *
@@ -236,13 +217,7 @@ export const analyzeGamePositions = async (
     for (const raw of results || []) {
       const t = raw.turnNumber ?? 0;
       if (t < 0 || t >= total) continue;
-      // Side to move at turn t = the player of move t+1 (opposite of last when t == len).
-      const currentPlayer: StoneColor = (
-        t < movePairs.length
-          ? movePairs[t][0]
-          : movePairs[movePairs.length - 1]?.[0] === 'B' ? 'W' : 'B'
-      ) as StoneColor;
-      out[t] = mapNativeResult(raw, currentPlayer);
+      out[t] = mapNativeResult(raw, currentPlayerAtTurn(movePairs, t));
     }
 
     onProgress?.(total, total);
@@ -251,6 +226,17 @@ export const analyzeGamePositions = async (
     console.error('analyzeGamePositions failed:', error);
     return new Array(total).fill(null);
   }
+};
+
+/**
+ * Browser-side EngineAdapter for the review pipeline: routes engine queries
+ * through the server's /api/katago endpoints (which pick local vs remote).
+ */
+export const browserEngineAdapter: EngineAdapter = {
+  analyzeGamePositions: (movePairs, komi, onProgress) =>
+    analyzeGamePositions(movePairs, komi, onProgress),
+  analyzePosition: (moves, komi, currentPlayer) =>
+    analyzePosition(moves, komi, currentPlayer),
 };
 
 /**

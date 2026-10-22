@@ -1,12 +1,17 @@
+/**
+ * The non-LLM review pipeline — single source of truth.
+ *
+ * Runs in the browser (ad-hoc "Analyze" on an open game, via the adapter in
+ * katagoService.ts) and on the server (review queue analyzing uploaded games,
+ * via engineServerAdapter.ts). The engine is injected so this module stays
+ * free of fetch endpoints, env vars, and caching concerns.
+ *
+ * Pipeline: SGF → shared-tree engine sweep → joseki/shape pattern detection →
+ * per-move quality classification → mistake typing → key moments → deep
+ * analysis of ambiguous positions → summary.
+ */
+
 import { parseSGF } from './sgfParser';
-import { batchAnalyze } from './katagoService';
-import {
-  sgfHash,
-  loadGameAnalysis,
-  saveGameAnalysis,
-  positionHash,
-  cacheAnalysis,
-} from './analysisCache';
 import {
   computeMoveQuality,
   detectMistakeType,
@@ -18,9 +23,7 @@ import {
 import { detectPatternsForGame } from './patternDetector';
 import { detectAmbiguousPositions, exploreVariations, createBudget } from './deepAnalysis';
 import { toGtpCoordinate } from './goLogic';
-import {
-  StoneColor,
-} from './types';
+import { StoneColor } from './types';
 import type {
   KataGoAnalysis,
   SemanticAnnotation,
@@ -35,10 +38,29 @@ import type {
 } from './types';
 
 // ---------------------------------------------------------------------------
-// In-memory cache for completed FullGameAnalysis results
+// Engine abstraction
 // ---------------------------------------------------------------------------
 
-const resultCache = new Map<string, FullGameAnalysis>();
+export interface EngineAdapter {
+  /** Analyze every turn of a game in one shared-tree query. Index t = board after t moves. */
+  analyzeGamePositions(
+    movePairs: Array<[string, string]>,
+    komi: number,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<(KataGoAnalysis | null)[]>;
+  /** Analyze a single position given a flat GTP move list ["B","D4","W","Q16",...]. */
+  analyzePosition(
+    moves: string[],
+    komi: number,
+    currentPlayer: StoneColor,
+  ): Promise<KataGoAnalysis | null>;
+}
+
+export interface ReviewOptions {
+  playerLevel?: PlayerLevel;
+  deepAnalysisBudget?: Partial<DeepAnalysisBudget>;
+  onProgress?: (progress: AnalysisProgressData) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,9 +74,7 @@ interface ExtractedMove {
   y: number;
 }
 
-/**
- * Walk the main line of a parsed game tree and extract moves as GTP.
- */
+/** Walk the main line of a parsed game tree and extract moves as GTP. */
 function extractMoves(tree: GameTree): ExtractedMove[] {
   const moves: ExtractedMove[] = [];
   let nodeId: string | null = tree.rootId;
@@ -78,21 +98,7 @@ function extractMoves(tree: GameTree): ExtractedMove[] {
   return moves;
 }
 
-/**
- * Build the flat GTP move list the KataGo proxy expects.
- * Format: ["B", "D4", "W", "Q16", ...]
- */
-function buildMoveList(moves: ExtractedMove[], upTo: number): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < upTo; i++) {
-    result.push(moves[i].color, moves[i].gtp);
-  }
-  return result;
-}
-
-/**
- * Extract komi from SGF root node properties, default 6.5.
- */
+/** Extract komi from SGF root node properties, default 6.5. */
 function extractKomi(tree: GameTree): number {
   const root = tree.nodes[tree.rootId];
   const km = root?.properties?.KM;
@@ -103,46 +109,47 @@ function extractKomi(tree: GameTree): number {
   return 6.5;
 }
 
+/** djb2 hash of SGF content — stable identity for an analysis result. */
+export function sgfHash(sgfContent: string): string {
+  let hash = 5381;
+  for (let i = 0; i < sgfContent.length; i++) {
+    hash = ((hash << 5) + hash + sgfContent.charCodeAt(i)) & 0xffffffff;
+  }
+  return `sgf_${hash.toString(36)}`;
+}
+
+function emptyResult(hash: string, level: PlayerLevel): FullGameAnalysis {
+  return {
+    sgfHash: hash,
+    playerLevel: level,
+    positions: [],
+    annotations: [],
+    keyMoments: [],
+    summary: {
+      totalMoves: 0,
+      classificationCounts: {
+        brilliant: 0, good: 0, neutral: 0, inaccuracy: 0, mistake: 0, blunder: 0,
+      },
+      phaseBreakdown: { opening: 0, middlegame: 0, endgame: 0 },
+      themes: [],
+    },
+    analyzedAt: Date.now(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/**
- * Analyze a full Go game from SGF content.
- *
- * Flow:
- *  1. Check cache (sgfHash) -- return immediately on hit
- *  2. Batch KataGo via batchAnalyze() -- report engine progress
- *  3. Semantic extraction -- classifyMove, detectMistakeType, etc.
- *  4. identifyKeyMoments on annotations
- *  5. Aggregate summary
- *  6. Cache result (memory + IndexedDB)
- *  7. Return FullGameAnalysis
- *
- * Commentary is lazy -- NOT generated here. UI calls
- * generateKeyMomentCommentary() on demand.
- */
-export async function analyzeGame(
+export async function runFullReview(
   sgfContent: string,
-  playerLevel?: PlayerLevel,
-  onProgress?: (progress: AnalysisProgressData) => void,
-  deepAnalysisBudget?: Partial<DeepAnalysisBudget>,
+  engine: EngineAdapter,
+  opts: ReviewOptions = {},
 ): Promise<FullGameAnalysis> {
+  const { playerLevel, deepAnalysisBudget, onProgress } = opts;
   const hash = sgfHash(sgfContent);
 
-  // ------------------------------------------------------------------
-  // 1. Cache check
-  // ------------------------------------------------------------------
-
-  const memoryCached = resultCache.get(hash);
-  if (memoryCached) {
-    onProgress?.({ phase: 'complete', current: 1, total: 1 });
-    return memoryCached;
-  }
-
-  // ------------------------------------------------------------------
-  // 2. Parse SGF
-  // ------------------------------------------------------------------
+  // --- Parse ---------------------------------------------------------------
 
   const tree = parseSGF(sgfContent);
   const moves = extractMoves(tree);
@@ -150,35 +157,13 @@ export async function analyzeGame(
   const komi = extractKomi(tree);
 
   if (totalMoves === 0) {
-    const empty = emptyResult(hash, playerLevel ?? 'beginner');
     onProgress?.({ phase: 'complete', current: 0, total: 0 });
-    return empty;
+    return emptyResult(hash, playerLevel ?? 'beginner');
   }
 
-  // ------------------------------------------------------------------
-  // 3. Batch KataGo analysis
-  // ------------------------------------------------------------------
-  // We need N+1 evaluations for N moves:
-  //   position 0 = empty board (eval before move 1)
-  //   position i = board after moves 1..i (eval after move i / before move i+1)
+  // --- Engine sweep (one shared-tree query over all turns) ------------------
 
-  const positionsToAnalyze = [];
-  for (let i = 0; i <= totalMoves; i++) {
-    const moveList = buildMoveList(moves, i);
-    // Current player at position i: whoever plays move i+1
-    // (or the opponent of the last mover if i == totalMoves)
-    const currentPlayer: string =
-      i < totalMoves
-        ? moves[i].color
-        : moves[totalMoves - 1].color === 'B'
-          ? 'W'
-          : 'B';
-    positionsToAnalyze.push({
-      moves: moveList,
-      komi,
-      currentPlayer: currentPlayer as StoneColor,
-    });
-  }
+  const movePairs: Array<[string, string]> = moves.map((m) => [m.color, m.gtp]);
 
   onProgress?.({
     phase: 'engine',
@@ -187,9 +172,9 @@ export async function analyzeGame(
     message: 'Fetching engine analysis...',
   });
 
-  const analysisResults = await batchAnalyze(
-    positionsToAnalyze,
-    3,
+  const analysisResults = await engine.analyzeGamePositions(
+    movePairs,
+    komi,
     (completed, total) => {
       onProgress?.({
         phase: 'engine',
@@ -200,9 +185,7 @@ export async function analyzeGame(
     },
   );
 
-  // ------------------------------------------------------------------
-  // 4. Semantic extraction
-  // ------------------------------------------------------------------
+  // --- Semantic extraction ---------------------------------------------------
 
   onProgress?.({
     phase: 'semantic',
@@ -211,9 +194,9 @@ export async function analyzeGame(
     message: 'Classifying moves...',
   });
 
-  // Pattern detection (replays game internally)
+  // Joseki/shape pattern detection (replays the game internally)
   const patterns = detectPatternsForGame(
-    moves.map(m => ({
+    moves.map((m) => ({
       x: m.x,
       y: m.y,
       color: m.color === 'B' ? StoneColor.BLACK : StoneColor.WHITE,
@@ -236,24 +219,17 @@ export async function analyzeGame(
     const { classification, scoreDelta, winrateDelta, pointsLost, winrateLost } =
       computeMoveQuality(evalBefore, evalAfter, actualMove, moves[i].color);
 
-    const engineTopMove = evalBefore.moveInfos[0]?.move ?? '';
-    const enginePV = evalBefore.moveInfos[0]?.pv ?? [];
+    const engineTopMove = evalBefore.moveInfos[0]?.move ?? actualMove;
+    const enginePV = evalBefore.moveInfos[0]?.pv ?? [engineTopMove];
 
     // The opponent's best reply after the played move IS the punishment line.
-    // For mistakes/blunders this is the refutation; the engine returns it
-    // directly now (no more iterative PV stitching).
     const refutationPV =
       classification === 'mistake' || classification === 'blunder'
         ? evalAfter.moveInfos[0]?.pv
         : undefined;
 
-    // Approximate board occupancy from move count
     const boardOccupancy = (i + 1) / 361;
-    const gamePhase = detectGamePhase(
-      i + 1,
-      evalBefore.ownership,
-      boardOccupancy,
-    );
+    const gamePhase = detectGamePhase(i + 1, evalBefore.ownership, boardOccupancy);
 
     const moveInfo = evalBefore.moveInfos.find((m) => m.move === actualMove);
     const themes = detectThemes(evalBefore, evalAfter, moveInfo);
@@ -262,7 +238,7 @@ export async function analyzeGame(
       moveNumber: i + 1,
       color: moves[i].color === 'B' ? StoneColor.BLACK : StoneColor.WHITE,
       classification,
-      // mistakeType is computed in step 5b below
+      // mistakeType is computed in the pass below
       scoreDelta,
       winrateDelta,
       pointsLost,
@@ -279,11 +255,7 @@ export async function analyzeGame(
     onProgress?.({ phase: 'semantic', current: i + 1, total: totalMoves });
   }
 
-  // ------------------------------------------------------------------
-  // 5. Detect mistake types
-  // ------------------------------------------------------------------
-  // Real engine data needs no bias normalization — scoreDelta is already
-  // the (negated) points lost vs. the best move. Sub-classify mistakes here.
+  // --- Mistake typing --------------------------------------------------------
 
   for (let j = 0; j < annotations.length; j++) {
     const ann = annotations[j];
@@ -303,26 +275,20 @@ export async function analyzeGame(
     };
   }
 
-  // ------------------------------------------------------------------
-  // 6. Key moments
-  // ------------------------------------------------------------------
+  // --- Key moments -----------------------------------------------------------
 
   const annotated = identifyKeyMoments(annotations, analysisResults);
   const keyMoments = annotated.filter((a) => a.isKeyMoment);
-
-  // Engine PVs (up to analysisPVLen moves) and refutation lines are already
-  // populated directly from the analysis engine during annotation — no
-  // iterative PV stitching needed.
-
   const estimatedLevel = playerLevel ?? estimatePlayerLevel(annotated);
 
-  // Build a flat GTP move list for deep analysis to reuse
-  const flatMoveList = buildMoveList(moves, totalMoves);
+  // --- Deep analysis of ambiguous positions ----------------------------------
 
-  // Preliminary result for ambiguity detection (positions needed)
   const positions = analysisResults.filter(
     (r): r is KataGoAnalysis => r !== null,
   );
+
+  const flatMoveList: string[] = [];
+  for (const m of moves) flatMoveList.push(m.color, m.gtp);
 
   const prelimResult: FullGameAnalysis = {
     sgfHash: hash,
@@ -361,13 +327,12 @@ export async function analyzeGame(
             message: `Deep analysis: ${completed}/${total} variations`,
           });
         },
+        (ms, k, p) => engine.analyzePosition(ms, k, p),
       );
     }
   }
 
-  // ------------------------------------------------------------------
-  // 7. Summary
-  // ------------------------------------------------------------------
+  // --- Summary ---------------------------------------------------------------
 
   const classificationCounts = {} as Record<MoveClassification, number>;
   for (const cls of [
@@ -380,26 +345,17 @@ export async function analyzeGame(
 
   const phaseBreakdown = {} as Record<GamePhase, number>;
   for (const phase of ['opening', 'middlegame', 'endgame'] as GamePhase[]) {
-    phaseBreakdown[phase] = annotated.filter(
-      (a) => a.gamePhase === phase,
-    ).length;
+    phaseBreakdown[phase] = annotated.filter((a) => a.gamePhase === phase).length;
   }
 
-  const allThemes = [
-    ...new Set(annotated.flatMap((a) => a.themes)),
-  ];
+  const allThemes = [...new Set(annotated.flatMap((a) => a.themes))];
 
-  // Collect unique pattern categories for summary
   const patternCategories = [
     ...new Set(
-      annotated
-        .filter((a) => a.pattern)
-        .map((a) => a.pattern!.category),
+      annotated.filter((a) => a.pattern).map((a) => a.pattern!.category),
     ),
   ];
-  if (patternCategories.length > 0) {
-    allThemes.push(...patternCategories.filter((c) => !allThemes.includes(c)));
-  }
+  allThemes.push(...patternCategories.filter((c) => !allThemes.includes(c)));
 
   const summary: AnalysisSummary = {
     totalMoves,
@@ -419,29 +375,6 @@ export async function analyzeGame(
     analyzedAt: Date.now(),
   };
 
-  // ------------------------------------------------------------------
-  // 7. Cache result
-  // ------------------------------------------------------------------
-
-  resultCache.set(hash, result);
-
-  // Persist position-level cache to IndexedDB (best-effort)
-  const positionDict: Record<string, KataGoAnalysis> = {};
-  for (let i = 0; i < positionsToAnalyze.length; i++) {
-    const analysis = analysisResults[i];
-    if (analysis) {
-      const posHash = positionHash(positionsToAnalyze[i].moves);
-      positionDict[posHash] = analysis;
-      cacheAnalysis(positionsToAnalyze[i].moves, analysis);
-    }
-  }
-
-  try {
-    await saveGameAnalysis(hash, positionDict);
-  } catch {
-    // IndexedDB persistence is best-effort
-  }
-
   onProgress?.({
     phase: 'complete',
     current: totalMoves,
@@ -453,34 +386,31 @@ export async function analyzeGame(
 }
 
 // ---------------------------------------------------------------------------
-// Utilities
+// Serialization (deepAnalysis.explorations is a Map — JSON turns it into {})
 // ---------------------------------------------------------------------------
 
-function emptyResult(hash: string, level: PlayerLevel): FullGameAnalysis {
+/** Convert a FullGameAnalysis to a JSON-safe plain object. */
+export function serializeAnalysis(analysis: FullGameAnalysis): any {
+  if (!analysis.deepAnalysis) return analysis;
   return {
-    sgfHash: hash,
-    playerLevel: level,
-    positions: [],
-    annotations: [],
-    keyMoments: [],
-    summary: {
-      totalMoves: 0,
-      classificationCounts: {
-        brilliant: 0,
-        good: 0,
-        neutral: 0,
-        inaccuracy: 0,
-        mistake: 0,
-        blunder: 0,
-      },
-      phaseBreakdown: { opening: 0, middlegame: 0, endgame: 0 },
-      themes: [],
+    ...analysis,
+    deepAnalysis: {
+      ...analysis.deepAnalysis,
+      explorations: [...analysis.deepAnalysis.explorations.entries()],
     },
-    analyzedAt: Date.now(),
   };
 }
 
-/** Clear the in-memory result cache (useful for testing). */
-export function clearResultCache(): void {
-  resultCache.clear();
+/** Rebuild a FullGameAnalysis from JSON (restores the explorations Map). */
+export function hydrateAnalysis(raw: any): FullGameAnalysis {
+  if (!raw?.deepAnalysis?.explorations) return raw as FullGameAnalysis;
+  const entries = Array.isArray(raw.deepAnalysis.explorations)
+    ? raw.deepAnalysis.explorations
+    : Object.entries(raw.deepAnalysis.explorations).map(
+        ([k, v]) => [Number(k), v] as [number, any],
+      );
+  return {
+    ...raw,
+    deepAnalysis: { ...raw.deepAnalysis, explorations: new Map(entries) },
+  } as FullGameAnalysis;
 }
