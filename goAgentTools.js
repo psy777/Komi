@@ -13,7 +13,7 @@
 //     winrate is Black's win probability. The system prompt tells the model this.
 //   - Ownership index = y*19 + x, y=0 top row, Black-positive (see ownershipSummary.ts).
 
-import { analyzePosition } from './katagoEngine.js';
+import { analyzePosition } from './katago.js';
 
 const SIZE = 19;
 

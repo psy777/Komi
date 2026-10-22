@@ -5,7 +5,7 @@ dotenv.config({ path: '.env.local', override: true });
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { analyzeGame, analyzePosition, isAvailable } from './katagoEngine.js';
+import { analyzeGame, analyzePosition, isAvailable, engineHealth } from './katago.js';
 import { llmGenerate, llmInfo } from './llmProvider.js';
 import { runGoAgentReview } from './goAgent.js';
 import db from './db.js';
@@ -248,8 +248,13 @@ app.post('/api/katago/game/stream', async (req, res) => {
   }
 });
 
-app.get('/api/katago/health', (_req, res) => {
-  res.json({ available: isAvailable() });
+app.get('/api/katago/health', async (_req, res) => {
+  try {
+    const health = await engineHealth();
+    res.json(health);
+  } catch {
+    res.json({ mode: 'remote', available: false, status: 'offline' });
+  }
 });
 
 // --- Auth ----------------------------------------------------------------
