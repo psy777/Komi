@@ -17,7 +17,9 @@ import { createEmptyGrid, playMove } from './goLogic';
 import { parseSGF, generateSGF } from './sgfParser';
 import { summarizeCommentary } from './geminiService';
 import { browserEngineAdapter } from './katagoService';
-import { runFullReview } from './reviewPipeline';
+import { runFullReview, hydrateAnalysis } from './reviewPipeline';
+import CommunityPanel from './CommunityPanel';
+import { me as fetchMe, type AccountUser, type GameSummary } from './apiClient';
 import { parseOgsGameId, fetchOgsSgf } from './ogsService';
 
 interface AppProps {
@@ -71,6 +73,14 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
 
   // OGS import state
   const [showLibrary, setShowLibrary] = useState(false);
+  // The library game currently open (null for ad-hoc/unsaved games). Drives
+  // the per-move community panel.
+  const [loadedGame, setLoadedGame] = useState<GameSummary | null>(null);
+  const [sessionUser, setSessionUser] = useState<AccountUser | null>(null);
+
+  useEffect(() => {
+    fetchMe().then(({ user }) => setSessionUser(user)).catch(() => {});
+  }, []);
   const [showOgsImport, setShowOgsImport] = useState(false);
   const [ogsUrl, setOgsUrl] = useState('');
   const [ogsLoading, setOgsLoading] = useState(false);
@@ -303,6 +313,8 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
       if (content) {
         try {
           setGameTree(parseSGF(content));
+          setLoadedGame(null);
+          setAnalysisResult(null);
         } catch (err) {
           console.error("SGF parse error:", err);
           alert(err instanceof Error ? err.message : "Failed to parse SGF file.");
@@ -326,6 +338,7 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
     try {
       const sgf = await fetchOgsSgf(gameId);
       setGameTree(parseSGF(sgf));
+      setLoadedGame(null);
       setShowOgsImport(false);
       setOgsUrl('');
       setAnalysisResult(null);
@@ -621,10 +634,11 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
         <GameLibrary
           onClose={() => setShowLibrary(false)}
           getCurrentSgf={() => generateSGF(gameTree)}
-          getCurrentAnalysis={() => analysisResult}
-          onLoad={(sgf, analysis) => {
+          onUser={setSessionUser}
+          onLoad={(sgf, analysis, game) => {
             setGameTree(parseSGF(sgf));
-            setAnalysisResult((analysis as FullGameAnalysis) ?? null);
+            setAnalysisResult(analysis ? hydrateAnalysis(analysis) : null);
+            setLoadedGame(game);
           }}
         />
       )}
@@ -810,6 +824,14 @@ const App: React.FC<AppProps> = ({ onOpenScorer }) => {
                         onShowEngineLine={() => handleShowPV(selectedAnnotation)}
                         onShowRefutation={() => handleShowRefutation(selectedAnnotation)}
                         onNavigateToMove={handleJumpToMove}
+                      />
+                    )}
+                    {/* Community commentary + discussion for saved games */}
+                    {loadedGame && currentDepth >= 1 && (
+                      <CommunityPanel
+                        gameId={loadedGame.id}
+                        moveNumber={currentDepth}
+                        user={sessionUser}
                       />
                     )}
                   </>
